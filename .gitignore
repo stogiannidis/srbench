@@ -1,0 +1,34 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Distribution/build
+build/
+dist/
+*.egg-info/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Machine learning artifacts
+*.h5
+*.ckpt
+logs/
+models/
+data/
+
+# Logging files
+*.log
+.neptune/
+wandb
+
+# Hidden files
+.DS_Store
+*.swp
+._*
