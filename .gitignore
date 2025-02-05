@@ -32,3 +32,6 @@ wandb
 .DS_Store
 *.swp
 ._*
+
+# Images
+* images/*.png
