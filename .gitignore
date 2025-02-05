@@ -34,4 +34,4 @@ wandb
 ._*
 
 # Images
-* images/*.png
+output/images/*.png
