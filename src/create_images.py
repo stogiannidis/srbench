@@ -17,7 +17,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()  # Optional: log to console as well.
+        # logging.StreamHandler()  # Optional: log to console as well.
     ]
 )
 
@@ -39,7 +39,7 @@ def create_pipeline(model_id: str) -> Any:
         )
     elif model_id == "black-forest-labs/FLUX.1-dev":
         return FluxPipeline.from_pretrained(
-            "bin/models/diffusers/black-forest-labs_FLUX.1-dev",
+            "bin/models/diffusers/FLUX.1-dev",
             torch_dtype=torch.bfloat16,
             device_map="balanced",
         )
@@ -77,6 +77,9 @@ def load_metadata_from_json(json_path: str) -> List[Dict[str, Any]]:
 # Main Routine
 # -------------------------------
 def main() -> None:
+    
+    logging.info("\n\nStarting the image generation process.")
+    
     try:
         # Define the list of diffusion models to use.
         diffusion_models = [
@@ -85,16 +88,15 @@ def main() -> None:
                 "steps": 50,
                 "scale": 4.5,
             },
-            # {
-            #     "model_id": "stabilityai/stable-diffusion-3.5-large",
-            #     "steps": 40,
-            #     "scale": 4.5,
-            # },
-            # Add more models here if needed.
+            {
+                "model_id": "stabilityai/stable-diffusion-3.5-large",
+                "steps": 50,
+                "scale": 5.5,
+            },
         ]
         
         # Load all the metadata once.
-        json_file = "output/prompts/small_llm_prompts_v3.jsonl"
+        json_file = "output/prompts/all-llm-prompts-trial_v1.jsonl"
         metadata_list: List[Dict[str, Any]] = load_metadata_from_json(json_file)
         if not metadata_list:
             logging.error("No metadata found in the JSON file.")
@@ -120,7 +122,7 @@ def main() -> None:
                 continue
 
             # Process each prompt using the current pipeline.
-            for idx, item in enumerate(metadata_list[:10]):
+            for idx, item in enumerate(metadata_list[40:50]):
                 prompt = item.get("generated_scene_description")
                 prompt_model = item.get("model", "unknown")  # Model that generated the prompt.
                 task_type = item.get("task_type", "unknown")   # Task type, if available.
@@ -129,7 +131,7 @@ def main() -> None:
                     logging.warning(f"Skipping metadata item at index {idx} due to missing prompt.")
                     continue
                 
-                output_image_filename = f"generated_scene_{idx}_{safe_model_id}.png"
+                output_image_filename = f"image_{idx:03d}_{task_type}_{prompt_model}.png"
                 logging.info(f"Processing prompt index {idx} with diffusion model '{diffusion_model_id}'")
                 try:
                     image_file_path = generate_image(
@@ -160,7 +162,7 @@ def main() -> None:
                 logging.info(f"Generated image for prompt index {idx} with diffusion model '{diffusion_model_id}'.")
 
         # Save the combined metadata to a new JSON Lines file.
-        output_metadata_file = "llm_scene_description_with_image.jsonl"
+        output_metadata_file = "all-llm-prompts-trial_v1_metadata.jsonl"
         with open(output_metadata_file, "w") as f:
             for record in output_metadata:
                 f.write(json.dumps(record) + "\n")

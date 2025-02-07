@@ -10,7 +10,7 @@ if ! command -v huggingface-cli &>/dev/null; then
 fi
 
 # Base directory to download models into
-download_base="../bin/models/llms"
+download_base="../bin/models/diffusers"
 
 # Create the base directory if it doesn't exist
 mkdir -p "$download_base"
@@ -18,7 +18,7 @@ mkdir -p "$download_base"
 # List of model identifiers to download
 models=(
     # "google/gemma-2-2b-it"
-    "google/gemma-2-27b-it"
+    # "google/gemma-2-27b-it"
     # "mistralai/Mistral-Small-24B-Instruct-2501"
     # "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
     # "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
@@ -29,12 +29,16 @@ models=(
 	# "stabilityai/stable-diffusion-3.5-large-turbo"
     # "black-forest-labs/FLUX.1-dev"
     # "dataautogpt3/OpenDalleV1.1"
+    # deepseek-ai/Janus-Pro-7B
+    # allenai/Llama-3.1-Tulu-3-8B
+    # allenai/OLMo-2-1124-13B-Instruct
+    DeepFloyd/IF-II-L-v1.0
 )
 
 # Loop through each model in the list
 for model in "${models[@]}"; do
-    # Create a local folder name by replacing "/" with "_"
-    folder=$(echo "$model" | tr '/' '_')
+    # Create a local folder name by removing everything before '/' and keeping only the part after it
+    folder="${model#*/}"
     target_dir="$download_base/$folder"
     echo "Downloading model: $model"
     echo "Target folder: $target_dir"

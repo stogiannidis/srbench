@@ -16,6 +16,7 @@ import logging
 import glob
 from typing import List, Dict, Tuple, Any
 
+import neptune.utils
 import torch
 import pandas as pd
 from transformers import pipeline
@@ -27,7 +28,7 @@ import neptune
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(filename="debug.log", encoding="utf-8", level=logging.DEBUG)
+logging.basicConfig(filename="debug_prompts.log", encoding="utf-8", level=logging.DEBUG)
 
 # -------------------------------
 # Type Aliases
@@ -40,10 +41,16 @@ MessageType = Dict[str, str]
 # Constants
 # -------------------------------
 SAVE_DIR = "output/prompts/"
+TRIAL_NAME = "all-llm-prompts-trial_v2"
 OUTPUT_FILENAME = (
-    f"{SAVE_DIR}small_llm_prompts_v3.jsonl"  # All prompts will be appended here.
+    f"{SAVE_DIR}{TRIAL_NAME}.jsonl"  # All prompts will be appended here.
 )
-TRIAL_NAME = "small-llm-prompts-trial_v3"
+
+# -------------------------------
+# 7. List of Models to Use
+# -------------------------------
+MODELS: List[str] = glob.glob("bin/models/llms/*")
+
 # -------------------------------
 # Initialize WandB
 # -------------------------------
@@ -52,12 +59,7 @@ wandb.init(
     name=TRIAL_NAME,
     config={
         "num_prompts_per_task": 10,
-        "models": [
-            "bin/models/llms/google_gemma-2-2b-it",
-            "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Qwen-7B",
-            "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Llama-8B",
-            "bin/models/llms/meta-llama_Llama-3.2-1B-Instruct",
-        ],
+        "models": MODELS,
     },
 )
 
@@ -70,73 +72,14 @@ neptune_run = neptune.init_run(
     name=TRIAL_NAME,
 )
 neptune_run["config/num_prompts_per_task"] = 10
-neptune_run["config/models"] = [
-    "bin/models/llms/google_gemma-2-2b-it",
-    "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Qwen-7B",
-    "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Llama-8B",
-    "bin/models/llms/meta-llama_Llama-3.2-1B-Instruct",
-]
+neptune_run["config/models"] = neptune.utils.stringify_unsupported(MODELS)
 
 # -------------------------------
 # 1. List of Simple Objects with Attributes
 # -------------------------------
-OBJECTS: List[ObjectType] = [
-    {
-        "name": "cube",
-        "attributes": [
-            "red",
-            "blue",
-            "green",
-            "large",
-            "small",
-            "transparent",
-            "glossy",
-        ],
-    },
-    {
-        "name": "sphere",
-        "attributes": [
-            "blue",
-            "metallic",
-            "glass",
-            "tiny",
-            "large",
-            "iridescent",
-            "matte",
-        ],
-    },
-    {
-        "name": "cylinder",
-        "attributes": [
-            "red",
-            "tall",
-            "short",
-            "wooden",
-            "plastic",
-            "smooth",
-            "textured",
-        ],
-    },
-    {
-        "name": "cone",
-        "attributes": [
-            "yellow",
-            "large",
-            "small",
-            "textured",
-            "shiny",
-            "matte",
-            "glossy",
-        ],
-    },
-    {
-        "name": "mug",
-        "attributes": ["ceramic", "white", "blue", "vintage", "modern", "elegant"],
-    },
-    {
-        "name": "book",
-        "attributes": ["open", "closed", "thick", "red", "ancient", "modern"],
-    },
+OBJECTS: List[str] = ["apples", "oranges", "bowling ball", "basket ball", "foot ball", "soccer ball", "tennis ball", "golf ball", "baseball"
+    "bicycle", "motorcycle", "scooter", "skateboard", "car", "truck", "bus", "train", "airplane", "helicopter", "man", "woiman", "kid",
+    "dog", "cat", "bird", "fish", "tree", "bush", "flower", "grass", "rock", "mountain", "hill", "valley", "river", "lake", "ocean", "sea",
 ]
 
 # -------------------------------
@@ -145,29 +88,24 @@ OBJECTS: List[ObjectType] = [
 # Each task now uses a concise definition and an example.
 SPATIAL_TASKS: List[SpatialTaskType] = [
     {
-        "task_type": "mental_rotation",
-        "definition": "Test the ability to mentally rotate an object.",
-        "example": "Identify the correct rotated version of a cube.",
+        "task_type": "mental rotation",
+        "example": "A vintage red convertible facing right, parked on a sunlit cobblestone street. Background details include lush green trees and charming old buildings bathed in soft afternoon light.",
     },
     {
-        "task_type": "physics_causality",
-        "definition": "Test understanding of cause and effect in physical scenarios.",
-        "example": "Predict where a rolling ball will land after colliding with an obstacle.",
+        "task_type": "physics and causality",
+        "example": "Two vibrant red apples, one tumbling from a high branch, the other dropping from a low fence, set against a soft-focus green orchard, bathed in warm sunlight.",
     },
-    {
-        "task_type": "compositionality",
-        "definition": "Test the ability to combine fragmented shapes into a cohesive whole.",
-        "example": "Determine which pieces assemble into a complete mug.",
-    },
-    {
-        "task_type": "visualization",
-        "definition": "Test the ability to visualize transformations such as folding or unfolding.",
-        "example": "Describe the final appearance of a folded paper with cutouts.",
-    },
+    # {
+    #     "task_type": "compositionality",
+    #     "example": "A tranquil park view, highlighting a weathered stone bench positioned near a towering pine tree, bathed in soft morning light, surrounded by lush, emerald grass and blooming wildflowers.",
+    # },
+    # {
+    #     "task_type": "visualization",
+    #     "example": "A piece of paper being crumpled into a ball, set against a stark white background, with soft shadows cast by a single light source.",
+    # },
     {
         "task_type": "perspective_taking",
-        "definition": "Test the ability to understand different viewpoints of a scene.",
-        "example": "Explain what a room looks like from a top-down view versus a frontal view.",
+        "example": "A cozy cafe scene featuring two individuals seated at a wooden table looking at a cup of coffee",
     },
 ]
 
@@ -175,17 +113,28 @@ SPATIAL_TASKS: List[SpatialTaskType] = [
 # 3. Enhanced System Prompt
 # -------------------------------
 # This prompt instructs the LLM to generate a test prompt for spatial reasoning.
-SYSTEM_PROMPT: str = """\
-You are an advanced assistant tasked with generating test prompts for spatial reasoning.
-Using the provided task details (definition and example) and, optionally, a description of simple objects,
-generate a concise image description prompt that can be used to test spatial reasoning.
-Respond with ONLY the final prompt text.
-"""
+SYSTEM_PROMPT: str = f"""
+You are an advanced assistant tasked with writing image generation prompts. You have 20+ years of expertise in cognitive psychology.
+Your task is to create a concise image description prompt that can be used to evaluate spatial reasoning abilities.
 
+Here are some examples:
+- Two identical apples are falling from different heights. Both apples are released at the same time.
+- A vintage red convertible facing right, parked on a sunlit cobblestone street.
+- Two men are sitting on a bench, one reading a book and the other is looking at distant mountains.
+- A woman is walking a dog in a park with blooming flowers and lush green trees.
+
+Give only the essential details needed to generate a detailed scene description.
+
+Hint: Include specific spatial relationships, object attributes, and environmental details to guide the scene construction process.
+Here are some optional objects you can use: {OBJECTS}. Feel free to add more objects as needed.
+
+Provide ONLY a concise short prompt for the image generation task. Do not include anything else.
+"""
 
 # -------------------------------
 # 4. Function to Construct a Prompt for a Given Task
 # -------------------------------
+
 def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
     """
     Constructs a test prompt using the task's definition and example, and optionally
@@ -200,29 +149,12 @@ def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
     task_type = task["task_type"]
     base_details = (
         f"Task Type: {task_type}\n"
-        f"Definition: {task['definition']}\n"
         f"Example: {task['example']}\n"
     )
-    # Optionally include one or two simple objects.
-    include_objects = random.choice([True, False])
-    if include_objects:
-        num_objs = random.choice([1, 2])
-        selected_objs = random.sample(OBJECTS, num_objs)
-        obj_descs = []
-        for obj in selected_objs:
-            attr = random.choice(obj["attributes"])
-            obj_descs.append(f"{attr} {obj['name']}")
-        if num_objs == 2:
-            relation = random.choice(
-                ["next to", "above", "below", "to the left of", "to the right of"]
-            )
-            object_details = f"Objects: {obj_descs[0]} {relation} {obj_descs[1]}.\n"
-        else:
-            object_details = f"Object: {obj_descs[0]}.\n"
-    else:
-        object_details = ""
-
-    user_prompt = f"{base_details}{object_details}\nGenerate a complete image description prompt based on the above."
+    user_prompt = (
+        f"Generate a complete image generation prompt following on the example provided; however, be creative and come up with your own unique prompt.\n"
+        f"{base_details}"
+    )
     return task_type, user_prompt
 
 
@@ -286,25 +218,15 @@ def extract_generated_text(outputs: Any) -> str:
 
 
 # -------------------------------
-# 7. List of Models to Use
-# -------------------------------
-MODELS: List[str] = [
-    "bin/models/llms/google_gemma-2-2b-it",
-    "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Qwen-7B",
-    "bin/models/llms/deepseek-ai_DeepSeek-R1-Distill-Llama-8B",
-    "bin/models/llms/meta-llama_Llama-3.2-1B-Instruct",
-]
-
-
-# -------------------------------
 # 8. Main Routine: Iterate Over All Model and Task Combinations
 # -------------------------------
 def main() -> None:
-    logger.info("Starting main routine with WandB and Neptune.ai logging.")
+    logger.info("\n\nStarting main routine with WandB and Neptune.ai logging.")
 
     for model_name in MODELS:
         logger.info("Processing model: %s", model_name)
-        sanitized_model: str = model_name.replace("/", "_")
+        # Get the original name of the model without the path.
+        sanitized_model: str = model_name.split("/")[-1]
         logger.info("Sanitized model name: %s", sanitized_model)
 
         # Initialize the text-generation pipeline for the current model.
@@ -318,7 +240,7 @@ def main() -> None:
 
         for task in SPATIAL_TASKS:
             # Generate a number of prompts for each task.
-            for i in range(5):  # Adjust number per task as needed.
+            for i in range(2):  # Adjust number per task as needed.
                 logger.info(
                     "Generating prompt %d for task: %s", i + 1, task["task_type"]
                 )
@@ -366,8 +288,8 @@ def main() -> None:
     results_df: pd.DataFrame = pd.read_json(OUTPUT_FILENAME, lines=True)
     
     # Log the Table of Contents to both platforms.
-    wandb.log({"toc": wandb.Table(data=results_df)})
-    neptune_run["output"].upload(f"{SAVE_DIR}toc.csv")
+    wandb.log({"results": wandb.Table(data=results_df)})
+    neptune_run["output"].upload(neptune.types.File.as_html(results_df))
 
     # Finish the run for both platforms.
     wandb.finish()
