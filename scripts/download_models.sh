@@ -10,7 +10,7 @@ if ! command -v huggingface-cli &>/dev/null; then
 fi
 
 # Base directory to download models into
-download_base="../bin/models/diffusers"
+download_base="../bin/models/vlms"
 
 # Create the base directory if it doesn't exist
 mkdir -p "$download_base"
@@ -32,7 +32,16 @@ models=(
     # deepseek-ai/Janus-Pro-7B
     # allenai/Llama-3.1-Tulu-3-8B
     # allenai/OLMo-2-1124-13B-Instruct
-    DeepFloyd/IF-II-L-v1.0
+    # DeepFloyd/IF-II-L-v1.0
+    # Qwen/Qwen2.5-VL-3B-Instruct
+    # Qwen/Qwen2.5-VL-7B-Instruct
+    # openbmb/MiniCPM-V-2_6
+    # HuggingFaceM4/Idefics3-8B-Llama3
+    # OpenGVLab/InternVL2_5-8B
+    # microsoft/Phi-3.5-vision-instruct
+    # deepseek-ai/deepseek-vl2-tiny
+    # deepseek-ai/deepseek-vl2
+    # THUDM/cogvlm2-llama3-chat-19B
 )
 
 # Loop through each model in the list

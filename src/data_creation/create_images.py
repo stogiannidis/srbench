@@ -2,7 +2,7 @@ import os
 import json
 import torch
 import logging
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Union
 from diffusers import FluxPipeline, StableDiffusion3Pipeline, StableDiffusionPipeline
 
 # -------------------------------
@@ -17,14 +17,13 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(LOG_FILE),
-        # logging.StreamHandler()  # Optional: log to console as well.
     ]
 )
 
 # -------------------------------
 # Type Aliases
 # -------------------------------
-Pipeline = Literal[StableDiffusionPipeline, StableDiffusion3Pipeline, FluxPipeline]
+Pipeline = Union[StableDiffusionPipeline, StableDiffusion3Pipeline, FluxPipeline]
 
 # -------------------------------
 # Function to create the appropriate pipeline based on model ID.
@@ -33,14 +32,14 @@ def create_pipeline(model_id: str) -> Any:
     logging.info(f"Creating pipeline for model: {model_id}")
     if model_id == "stabilityai/stable-diffusion-3.5-large":
         return StableDiffusion3Pipeline.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
+            "bin/models/diffusers/stable-diffusion-3.5-large",
+            # torch_dtype=torch.bfloat16,
             device_map="balanced",
         )
     elif model_id == "black-forest-labs/FLUX.1-dev":
         return FluxPipeline.from_pretrained(
             "bin/models/diffusers/FLUX.1-dev",
-            torch_dtype=torch.bfloat16,
+            # torch_dtype=torch.bfloat16,
             device_map="balanced",
         )
     else:
@@ -86,7 +85,7 @@ def main() -> None:
             {
                 "model_id": "black-forest-labs/FLUX.1-dev",
                 "steps": 50,
-                "scale": 4.5,
+                "scale": 5.5,
             },
             {
                 "model_id": "stabilityai/stable-diffusion-3.5-large",
@@ -96,7 +95,9 @@ def main() -> None:
         ]
         
         # Load all the metadata once.
-        json_file = "output/prompts/all-llm-prompts-trial_v1.jsonl"
+        json_file = "output/prompts/fiveshot-prompts-trial_v1.jsonl"
+        output_dir = "output/images" + json_file.split("/")[-1].split("-")[0]
+        
         metadata_list: List[Dict[str, Any]] = load_metadata_from_json(json_file)
         if not metadata_list:
             logging.error("No metadata found in the JSON file.")
@@ -113,7 +114,7 @@ def main() -> None:
 
             # Create a safe folder name for the model.
             safe_model_id = diffusion_model_id.replace("/", "_")
-            output_dir = os.path.join("output", "images", safe_model_id)
+            output_dir = os.path.join("output", "images", output_dir, safe_model_id)
             logging.info(f"Initializing pipeline for diffusion model '{diffusion_model_id}'")
             try:
                 pipeline = create_pipeline(diffusion_model_id)
@@ -122,10 +123,12 @@ def main() -> None:
                 continue
 
             # Process each prompt using the current pipeline.
-            for idx, item in enumerate(metadata_list[40:50]):
-                prompt = item.get("generated_scene_description")
-                prompt_model = item.get("model", "unknown")  # Model that generated the prompt.
-                task_type = item.get("task_type", "unknown")   # Task type, if available.
+            for idx, item in enumerate(metadata_list):
+                prompt = item.get(
+                    "generated_scene_description", None
+                )  # The text prompt.
+                prompt_model = item.get("model", "Human")  # Model that generated the prompt.
+                task_type = item.get("task", "unknown")   # Task type, if available.
                 
                 if not prompt:
                     logging.warning(f"Skipping metadata item at index {idx} due to missing prompt.")
@@ -162,8 +165,8 @@ def main() -> None:
                 logging.info(f"Generated image for prompt index {idx} with diffusion model '{diffusion_model_id}'.")
 
         # Save the combined metadata to a new JSON Lines file.
-        output_metadata_file = "all-llm-prompts-trial_v1_metadata.jsonl"
-        with open(output_metadata_file, "w") as f:
+        output_metadata_file = "handwritten_metadata.jsonl"
+        with open(output_metadata_file, "a") as f:
             for record in output_metadata:
                 f.write(json.dumps(record) + "\n")
         logging.info(f"Updated metadata saved to '{output_metadata_file}'.")

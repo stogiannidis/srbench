@@ -34,4 +34,11 @@ wandb
 ._*
 
 # Images
-output/images/*.png
+output/
+
+# Files
+*.csv
+*.json
+*.yaml
+*.yml
+*.jsonl

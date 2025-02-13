@@ -25,7 +25,7 @@ import wandb
 import neptune
 
 # Load environment variables from the .env file.
-load_dotenv()
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename="debug_prompts.log", encoding="utf-8", level=logging.DEBUG)
@@ -41,11 +41,11 @@ MessageType = Dict[str, str]
 # Constants
 # -------------------------------
 SAVE_DIR = "output/prompts/"
-TRIAL_NAME = "all-llm-prompts-trial_v2"
+TRIAL_NAME = "fiveshot-prompts-trial_v1"
 OUTPUT_FILENAME = (
     f"{SAVE_DIR}{TRIAL_NAME}.jsonl"  # All prompts will be appended here.
 )
-
+PROMPTS_PER_TASK = 3
 # -------------------------------
 # 7. List of Models to Use
 # -------------------------------
@@ -58,7 +58,7 @@ wandb.init(
     project="SpatialScenePrompts",
     name=TRIAL_NAME,
     config={
-        "num_prompts_per_task": 10,
+        "num_prompts_per_task": PROMPTS_PER_TASK,
         "models": MODELS,
     },
 )
@@ -71,7 +71,7 @@ neptune_run = neptune.init_run(
     api_token=os.getenv("NEPTUNE_API_TOKEN"),  # Replace with your Neptune API token.
     name=TRIAL_NAME,
 )
-neptune_run["config/num_prompts_per_task"] = 10
+neptune_run["config/num_prompts_per_task"] = PROMPTS_PER_TASK
 neptune_run["config/models"] = neptune.utils.stringify_unsupported(MODELS)
 
 # -------------------------------
@@ -88,24 +88,22 @@ OBJECTS: List[str] = ["apples", "oranges", "bowling ball", "basket ball", "foot 
 # Each task now uses a concise definition and an example.
 SPATIAL_TASKS: List[SpatialTaskType] = [
     {
-        "task_type": "mental rotation",
-        "example": "A vintage red convertible facing right, parked on a sunlit cobblestone street. Background details include lush green trees and charming old buildings bathed in soft afternoon light.",
-    },
-    {
         "task_type": "physics and causality",
-        "example": "Two vibrant red apples, one tumbling from a high branch, the other dropping from a low fence, set against a soft-focus green orchard, bathed in warm sunlight.",
+        "examples": [
+            "Two red vibrant apples of the same size falling from different heights surrounded by a soft bokeh of autumn leaves, warm hues of orange and yellow, with the late afternoon sun casting long shadows.",
+            "Photograph of a A laptop standing at the edge of a desk ready to fall",
+            "Three mugs are stacked on top of each other leaning to the left. One more mug would cause the stack to fall",
+            "Two playful dogs, a heartbeat before collision, in a photograph capturing the joyous energy of a candid moment; dynamic, high-resolution, impressionistic style reminiscent of Ed Ruschas street photography.",
+            "A bowling ball and a basket ball rolling down a steep hill, bright blue natural light, 35mm photography, wide shot, highly detailed, 8K, art by artgerm and greg rutkowski and alphonse mucha",
+        ],
     },
-    # {
-    #     "task_type": "compositionality",
-    #     "example": "A tranquil park view, highlighting a weathered stone bench positioned near a towering pine tree, bathed in soft morning light, surrounded by lush, emerald grass and blooming wildflowers.",
-    # },
-    # {
-    #     "task_type": "visualization",
-    #     "example": "A piece of paper being crumpled into a ball, set against a stark white background, with soft shadows cast by a single light source.",
-    # },
     {
-        "task_type": "perspective_taking",
-        "example": "A cozy cafe scene featuring two individuals seated at a wooden table looking at a cup of coffee",
+        "task_type": "perspective taking",
+        "examples": ["A photograph of a family of four, two adults and two children, standing in a row, with the camera positioned at the height of the children, looking up at the adults, who are smiling down at them.",
+        "Street artist, vividly painting a vibrant mural, surrounded by captivated pedestrians, in a stencil-like graffiti style, with a gritty urban setting, drenched in chiaroscuro lighting for a dramatic and lively atmosphere.",
+        "Vibrant street vendors, laden with an array of ripe fruits, amidst the lively hustle of a farmers market - captured in the style of a vivid, Impressionist oil painting, with warm sunlight filtering through a cloud-speckled sky.",
+        "Scuba diver capturing a vibrant, up-close moment with a majestic sea turtle among intricately detailed, luminous coral reef, in the style of a high-definition underwater photograph blending vivid hues and soft shadows, with a serene, lively atmosphere.",
+        "Toddler and playful puppy in sunlit backyard, chasing iridescent bubbles in whimsical Impressionist style, vibrant colors, tender atmosphere, capturing the joy of childhood and canine companionship."]
     },
 ]
 
@@ -113,23 +111,7 @@ SPATIAL_TASKS: List[SpatialTaskType] = [
 # 3. Enhanced System Prompt
 # -------------------------------
 # This prompt instructs the LLM to generate a test prompt for spatial reasoning.
-SYSTEM_PROMPT: str = f"""
-You are an advanced assistant tasked with writing image generation prompts. You have 20+ years of expertise in cognitive psychology.
-Your task is to create a concise image description prompt that can be used to evaluate spatial reasoning abilities.
-
-Here are some examples:
-- Two identical apples are falling from different heights. Both apples are released at the same time.
-- A vintage red convertible facing right, parked on a sunlit cobblestone street.
-- Two men are sitting on a bench, one reading a book and the other is looking at distant mountains.
-- A woman is walking a dog in a park with blooming flowers and lush green trees.
-
-Give only the essential details needed to generate a detailed scene description.
-
-Hint: Include specific spatial relationships, object attributes, and environmental details to guide the scene construction process.
-Here are some optional objects you can use: {OBJECTS}. Feel free to add more objects as needed.
-
-Provide ONLY a concise short prompt for the image generation task. Do not include anything else.
-"""
+SYSTEM_PROMPT: str = "You are helpful AI assistant tasked to help people with their requests."
 
 # -------------------------------
 # 4. Function to Construct a Prompt for a Given Task
@@ -147,13 +129,10 @@ def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
             A tuple with the task type and the constructed user prompt.
     """
     task_type = task["task_type"]
-    base_details = (
-        f"Task Type: {task_type}\n"
-        f"Example: {task['example']}\n"
-    )
+    examples = task["examples"]
     user_prompt = (
-        f"Generate a complete image generation prompt following on the example provided; however, be creative and come up with your own unique prompt.\n"
-        f"{base_details}"
+        f"Here are example prompts for a text-to-image generation model: {examples}.\n"
+        f"Transform Task Type: {task_type} into a prompt. Answer in only the transformed prompt, similar to the examples."
     )
     return task_type, user_prompt
 
@@ -235,12 +214,16 @@ def main() -> None:
             model=model_name,
             device_map="auto",
             torch_dtype=torch.bfloat16,
+            return_full_text=False,
+            do_sample=True,
+            top_k=10,
         )
+        eos_token_id = llm_pipe.tokenizer.eos_token_id
         logger.info("Pipeline initialized for %s", sanitized_model)
 
         for task in SPATIAL_TASKS:
             # Generate a number of prompts for each task.
-            for i in range(2):  # Adjust number per task as needed.
+            for i in range(PROMPTS_PER_TASK):
                 logger.info(
                     "Generating prompt %d for task: %s", i + 1, task["task_type"]
                 )
@@ -255,7 +238,11 @@ def main() -> None:
                 prompt_input = prepare_pipeline_input(messages, model_name)
 
                 # Generate the scene description using the LLM.
-                outputs: Any = llm_pipe(prompt_input, max_new_tokens=2048)
+                outputs: Any = llm_pipe(
+                    prompt_input,
+                    max_new_tokens=2048,
+                    pad_token_id=eos_token_id,
+                )
                 generated_text: str = extract_generated_text(outputs)
                 if generated_text:
                     cleaned_text = post_process_output(generated_text)
