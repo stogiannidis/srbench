@@ -21,7 +21,7 @@ import torch
 import pandas as pd
 from transformers import pipeline
 from dotenv import load_dotenv
-import wandb 
+import wandb
 import neptune
 
 # Load environment variables from the .env file.
@@ -41,11 +41,9 @@ MessageType = Dict[str, str]
 # Constants
 # -------------------------------
 SAVE_DIR = "output/prompts/"
-TRIAL_NAME = "fiveshot-prompts-trial_v1"
-OUTPUT_FILENAME = (
-    f"{SAVE_DIR}{TRIAL_NAME}.jsonl"  # All prompts will be appended here.
-)
-PROMPTS_PER_TASK = 3
+TRIAL_NAME = "fiveshotv3-prompts-trial"
+OUTPUT_FILENAME = f"{SAVE_DIR}{TRIAL_NAME}.jsonl"  # All prompts will be appended here.
+PROMPTS_PER_TASK = 12
 # -------------------------------
 # 7. List of Models to Use
 # -------------------------------
@@ -77,9 +75,40 @@ neptune_run["config/models"] = neptune.utils.stringify_unsupported(MODELS)
 # -------------------------------
 # 1. List of Simple Objects with Attributes
 # -------------------------------
-OBJECTS: List[str] = ["apples", "oranges", "bowling ball", "basket ball", "foot ball", "soccer ball", "tennis ball", "golf ball", "baseball"
-    "bicycle", "motorcycle", "scooter", "skateboard", "car", "truck", "bus", "train", "airplane", "helicopter", "man", "woiman", "kid",
-    "dog", "cat", "bird", "fish", "tree", "bush", "flower", "grass", "rock", "mountain", "hill", "valley", "river", "lake", "ocean", "sea",
+OBJECTS: List[str] = [
+    "apples",
+    "oranges",
+    "bowling ball",
+    "basket ball",
+    "foot ball",
+    "soccer ball",
+    "bicycle",
+    "motorcycle",
+    "scooter",
+    "skateboard",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "man",
+    "woman",
+    "kid",
+    "dog",
+    "cat",
+    "bird",
+    "fish",
+    "tree",
+    "bush",
+    "flower",
+    "grass",
+    "rock",
+    "mountain",
+    "hill",
+    "valley",
+    "river",
+    "lake",
+    "ocean",
+    "sea",
 ]
 
 # -------------------------------
@@ -87,23 +116,25 @@ OBJECTS: List[str] = ["apples", "oranges", "bowling ball", "basket ball", "foot 
 # -------------------------------
 # Each task now uses a concise definition and an example.
 SPATIAL_TASKS: List[SpatialTaskType] = [
-    {
-        "task_type": "physics and causality",
-        "examples": [
-            "Two red vibrant apples of the same size falling from different heights surrounded by a soft bokeh of autumn leaves, warm hues of orange and yellow, with the late afternoon sun casting long shadows.",
-            "Photograph of a A laptop standing at the edge of a desk ready to fall",
-            "Three mugs are stacked on top of each other leaning to the left. One more mug would cause the stack to fall",
-            "Two playful dogs, a heartbeat before collision, in a photograph capturing the joyous energy of a candid moment; dynamic, high-resolution, impressionistic style reminiscent of Ed Ruschas street photography.",
-            "A bowling ball and a basket ball rolling down a steep hill, bright blue natural light, 35mm photography, wide shot, highly detailed, 8K, art by artgerm and greg rutkowski and alphonse mucha",
-        ],
-    },
+    # {
+    #     "task_type": "physics and causality",
+    #     "examples": [
+    #         "Two red vibrant apples of the same size falling from different heights surrounded by a soft bokeh of autumn leaves, warm hues of orange and yellow, with the late afternoon sun casting long shadows.",
+    #         "Photograph of a A laptop standing at the edge of a desk ready to fall",
+    #         "Three mugs are stacked on top of each other leaning to the left. One more mug would cause the stack to fall",
+    #         "Two playful dogs, a heartbeat before collision, in a photograph capturing the joyous energy of a candid moment; dynamic, high-resolution, impressionistic style reminiscent of Ed Ruschas street photography.",
+    #         "A bowling ball and a basket ball rolling down a steep hill, bright blue natural light, 35mm photography, wide shot, highly detailed, 8K, art by artgerm and greg rutkowski and alphonse mucha",
+    #     ],
+    # },
     {
         "task_type": "perspective taking",
-        "examples": ["A photograph of a family of four, two adults and two children, standing in a row, with the camera positioned at the height of the children, looking up at the adults, who are smiling down at them.",
-        "Street artist, vividly painting a vibrant mural, surrounded by captivated pedestrians, in a stencil-like graffiti style, with a gritty urban setting, drenched in chiaroscuro lighting for a dramatic and lively atmosphere.",
-        "Vibrant street vendors, laden with an array of ripe fruits, amidst the lively hustle of a farmers market - captured in the style of a vivid, Impressionist oil painting, with warm sunlight filtering through a cloud-speckled sky.",
-        "Scuba diver capturing a vibrant, up-close moment with a majestic sea turtle among intricately detailed, luminous coral reef, in the style of a high-definition underwater photograph blending vivid hues and soft shadows, with a serene, lively atmosphere.",
-        "Toddler and playful puppy in sunlit backyard, chasing iridescent bubbles in whimsical Impressionist style, vibrant colors, tender atmosphere, capturing the joy of childhood and canine companionship."]
+        "examples": [
+            "A photograph of a family of four, two adults and two children, standing in a row, with the camera positioned at the height of the children, looking up at the adults, who are smiling down at them.",
+            "Street artist, vividly painting a vibrant mural, surrounded by captivated pedestrians, in a stencil-like graffiti style, with a gritty urban setting, drenched in chiaroscuro lighting for a dramatic and lively atmosphere.",
+            "Vibrant street vendors, laden with an array of ripe fruits, amidst the lively hustle of a farmers market - captured in the style of a vivid, Impressionist oil painting, with warm sunlight filtering through a cloud-speckled sky.",
+            "Scuba diver capturing a vibrant, up-close moment with a majestic sea turtle among intricately detailed, luminous coral reef, in the style of a high-definition underwater photograph blending vivid hues and soft shadows, with a serene, lively atmosphere.",
+            "Toddler and playful puppy in sunlit backyard, chasing iridescent bubbles in whimsical Impressionist style, vibrant colors, tender atmosphere, capturing the joy of childhood and canine companionship.",
+        ],
     },
 ]
 
@@ -111,11 +142,14 @@ SPATIAL_TASKS: List[SpatialTaskType] = [
 # 3. Enhanced System Prompt
 # -------------------------------
 # This prompt instructs the LLM to generate a test prompt for spatial reasoning.
-SYSTEM_PROMPT: str = "You are helpful AI assistant tasked to help people with their requests."
+SYSTEM_PROMPT: str = (
+    "You are helpful AI assistant tasked to help people with their requests."
+)
 
 # -------------------------------
 # 4. Function to Construct a Prompt for a Given Task
 # -------------------------------
+
 
 def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
     """
@@ -132,7 +166,8 @@ def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
     examples = task["examples"]
     user_prompt = (
         f"Here are example prompts for a text-to-image generation model: {examples}.\n"
-        f"Transform Task Type: {task_type} into a prompt. Answer in only the transformed prompt, similar to the examples."
+        f"Please Generate a prompt based on the examples above using the following objects: {OBJECTS}."
+        "Answer in only the prompt."
     )
     return task_type, user_prompt
 
@@ -273,7 +308,7 @@ def main() -> None:
 
     # Create a Table of Contents for the generated prompts.
     results_df: pd.DataFrame = pd.read_json(OUTPUT_FILENAME, lines=True)
-    
+
     # Log the Table of Contents to both platforms.
     wandb.log({"results": wandb.Table(data=results_df)})
     neptune_run["output"].upload(neptune.types.File.as_html(results_df))

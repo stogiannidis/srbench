@@ -42,3 +42,4 @@ output/
 *.yaml
 *.yml
 *.jsonl
+*.html

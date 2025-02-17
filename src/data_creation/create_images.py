@@ -2,170 +2,153 @@ import os
 import json
 import torch
 import logging
-from typing import Any, Dict, List, Union
-from diffusers import FluxPipeline, StableDiffusion3Pipeline, StableDiffusionPipeline
+from diffusers import FluxPipeline, StableDiffusion3Pipeline
 
-# -------------------------------
-# Logging configuration
-# -------------------------------
+# Configure logging
 LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)  # Create logs directory if it doesn't exist.
+os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, "app.log")
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-    ]
+    handlers=[logging.FileHandler(LOG_FILE)],
 )
 
-# -------------------------------
-# Type Aliases
-# -------------------------------
-Pipeline = Union[StableDiffusionPipeline, StableDiffusion3Pipeline, FluxPipeline]
 
-# -------------------------------
-# Function to create the appropriate pipeline based on model ID.
-# -------------------------------
-def create_pipeline(model_id: str) -> Any:
-    logging.info(f"Creating pipeline for model: {model_id}")
-    if model_id == "stabilityai/stable-diffusion-3.5-large":
-        return StableDiffusion3Pipeline.from_pretrained(
-            "bin/models/diffusers/stable-diffusion-3.5-large",
-            # torch_dtype=torch.bfloat16,
-            device_map="balanced",
+class DiffusionPipelineWrapper:
+    def __init__(self, model_id: str, steps: int = 40, scale: float = 4.5):
+        self.model_id = model_id
+        self.steps = steps
+        self.scale = scale
+        logging.info(f"Initializing wrapper for {model_id}")
+        self.pipeline = self._create_pipeline(model_id)
+
+    def _create_pipeline(self, model_id: str):
+        if model_id == "stabilityai/stable-diffusion-3.5-large":
+            pipe = StableDiffusion3Pipeline.from_pretrained(
+                "bin/models/diffusers/stable-diffusion-3.5-large",
+                device_map="balanced",
+            )
+        elif model_id == "black-forest-labs/FLUX.1-dev":
+            pipe = FluxPipeline.from_pretrained(
+                "bin/models/diffusers/FLUX.1-dev",
+                torch_dtype=torch.bfloat16,
+                device_map="balanced",
+            )
+        else:
+            raise ValueError(
+                "Unsupported model id. Use 'stabilityai/stable-diffusion-3.5-large' or 'black-forest-labs/FLUX.1-dev'."
+            )
+        return pipe
+
+    def _call_pipeline(self, prompt: str):
+        clip_prompt = prompt[:300]
+        if isinstance(self.pipeline, StableDiffusion3Pipeline):
+            return self.pipeline(
+                prompt=clip_prompt,
+                prompt_3=prompt,
+                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition",
+                num_inference_steps=self.steps,
+                guidance_scale=self.scale,
+            )
+        elif isinstance(self.pipeline, FluxPipeline):
+            logging.info("Using FLUX.1-dev: sending full prompt as 'prompt_2'.")
+            return self.pipeline(
+                prompt=clip_prompt,
+                prompt_2=prompt,
+                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition",
+                num_inference_steps=self.steps,
+                guidance_scale=self.scale,
+            )
+        else:
+            raise ValueError("Unsupported pipeline type.")
+
+    def generate_image(self, prompt: str, output_filename: str, output_dir: str) -> str:
+        logging.info(
+            f"Generating image with prompt (first 30 chars): '{prompt[:30]}...'"
         )
-    elif model_id == "black-forest-labs/FLUX.1-dev":
-        return FluxPipeline.from_pretrained(
-            "bin/models/diffusers/FLUX.1-dev",
-            # torch_dtype=torch.bfloat16,
-            device_map="balanced",
-        )
-    else:
-        return StableDiffusionPipeline.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="balanced",
-        )
+        with torch.no_grad():
+            result = self._call_pipeline(prompt)
+            image = result.images[0]
+        os.makedirs(output_dir, exist_ok=True)
+        image_path = os.path.join(output_dir, output_filename)
+        image.save(image_path)
+        logging.info(f"Image saved to {image_path}")
+        return image_path
 
-# -------------------------------
-# Function to generate an image using a given prompt and pipeline.
-# Returns the file path where the image was saved.
-# -------------------------------
-def generate_image(prompt: str, pipe: Pipeline, output_filename: str, output_dir: str, steps: int = 40, scale: float = 4.5) -> str:
-    logging.info(f"Generating image with prompt: {prompt[:30]}... using {output_filename}, steps={steps}, scale={scale}")
-    image = pipe(prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
-    os.makedirs(output_dir, exist_ok=True)
-    image_file_path = os.path.join(output_dir, output_filename)
-    image.save(image_file_path)
-    logging.info(f"Image saved to {image_file_path}")
-    return image_file_path
+    def __call__(self, prompt: str, output_filename: str, output_dir: str) -> str:
+        return self.generate_image(prompt, output_filename, output_dir)
 
-# -------------------------------
-# Function to load the prompt (and metadata) from a JSON Lines file.
-# -------------------------------
-def load_metadata_from_json(json_path: str) -> List[Dict[str, Any]]:
-    logging.info(f"Loading metadata from {json_path}")
-    with open(json_path, 'r') as f:
-        data = [json.loads(line.strip()) for line in f if line.strip()]
-    logging.info(f"Loaded {len(data)} metadata items.")
-    return data
+    @staticmethod
+    def load_metadata_from_json(json_path: str):
+        logging.info(f"Loading metadata from {json_path}")
+        with open(json_path, "r") as f:
+            data = [json.loads(line.strip()) for line in f if line.strip()]
+        logging.info(f"Loaded {len(data)} metadata items.")
+        return data
 
-# -------------------------------
-# Main Routine
-# -------------------------------
-def main() -> None:
-    
-    logging.info("\n\nStarting the image generation process.")
-    
+
+def main():
+    logging.info("Starting image generation process using DiffusionPipelineWrapper.")
     try:
-        # Define the list of diffusion models to use.
         diffusion_models = [
-            {
-                "model_id": "black-forest-labs/FLUX.1-dev",
-                "steps": 50,
-                "scale": 5.5,
-            },
+            {"model_id": "black-forest-labs/FLUX.1-dev", "steps": 50, "scale": 7.5},
             {
                 "model_id": "stabilityai/stable-diffusion-3.5-large",
                 "steps": 50,
-                "scale": 5.5,
+                "scale": 7.5,
             },
         ]
-        
-        # Load all the metadata once.
-        json_file = "output/prompts/fiveshot-prompts-trial_v1.jsonl"
-        output_dir = "output/images" + json_file.split("/")[-1].split("-")[0]
-        
-        metadata_list: List[Dict[str, Any]] = load_metadata_from_json(json_file)
+        json_file = "output/prompts/fiveshotv3-prompts-trial.jsonl"
+        base_output_dir = "output/images" + json_file.split("/")[-1].split("-")[0]
+        metadata_list = DiffusionPipelineWrapper.load_metadata_from_json(json_file)
         if not metadata_list:
             logging.error("No metadata found in the JSON file.")
             return
 
-        # Prepare a list to collect output metadata.
         output_metadata = []
-
-        # For each diffusion model, instantiate the pipeline once and process all prompts.
         for diff_model in diffusion_models:
-            diffusion_model_id = diff_model["model_id"]
+            model_id = diff_model["model_id"]
             steps = diff_model.get("steps", 40)
             scale = diff_model.get("scale", 4.5)
-
-            # Create a safe folder name for the model.
-            safe_model_id = diffusion_model_id.replace("/", "_")
-            output_dir = os.path.join("output", "images", output_dir, safe_model_id)
-            logging.info(f"Initializing pipeline for diffusion model '{diffusion_model_id}'")
+            safe_model_id = model_id.replace("/", "_")
+            output_dir = os.path.join(base_output_dir, safe_model_id)
+            logging.info(f"Initializing wrapper for model '{model_id}'")
             try:
-                pipeline = create_pipeline(diffusion_model_id)
+                wrapper = DiffusionPipelineWrapper(model_id, steps, scale)
             except Exception as e:
-                logging.error(f"Failed to create pipeline for model {diffusion_model_id}: {e}")
+                logging.error(f"Failed to initialize wrapper for model {model_id}: {e}")
                 continue
 
-            # Process each prompt using the current pipeline.
             for idx, item in enumerate(metadata_list):
-                prompt = item.get(
-                    "generated_scene_description", None
-                )  # The text prompt.
-                prompt_model = item.get("model", "Human")  # Model that generated the prompt.
-                task_type = item.get("task", "unknown")   # Task type, if available.
-                
+                prompt = item.get("generated_scene_description")
                 if not prompt:
-                    logging.warning(f"Skipping metadata item at index {idx} due to missing prompt.")
-                    continue
-                
-                output_image_filename = f"image_{idx:03d}_{task_type}_{prompt_model}.png"
-                logging.info(f"Processing prompt index {idx} with diffusion model '{diffusion_model_id}'")
-                try:
-                    image_file_path = generate_image(
-                        prompt,
-                        pipeline,
-                        output_image_filename,
-                        output_dir,
-                        steps=steps,
-                        scale=scale
+                    logging.warning(
+                        f"Skipping prompt index {idx} due to missing description."
                     )
-                except Exception as e:
-                    logging.error(f"Error generating image for prompt index {idx} with model {diffusion_model_id}: {e}")
                     continue
-
-                # Record combined metadata.
+                output_filename = f"image_{idx:03d}.png"
+                try:
+                    with torch.no_grad():
+                        image_path = wrapper(prompt, output_filename, output_dir)
+                except Exception as e:
+                    logging.error(
+                        f"Error generating image for prompt index {idx} with model {model_id}: {e}"
+                    )
+                    continue
                 record = {
-                    "prompt_model": prompt_model,
+                    "model_id": model_id,
                     "prompt": prompt,
-                    "task_type": task_type,
-                    "diffusion_model": diffusion_model_id,
-                    "image_path": image_file_path,
-                    "generation_details": {
-                        "steps": steps,
-                        "scale": scale,
-                    }
+                    "image_path": image_path,
+                    "steps": steps,
+                    "scale": scale,
                 }
                 output_metadata.append(record)
-                logging.info(f"Generated image for prompt index {idx} with diffusion model '{diffusion_model_id}'.")
+                logging.info(
+                    f"Generated image for prompt index {idx} using model '{model_id}'."
+                )
 
-        # Save the combined metadata to a new JSON Lines file.
-        output_metadata_file = "handwritten_metadata.jsonl"
+        output_metadata_file = f"metadata_{json_file.split('/')[-1].split('-')[0]}.jsonl"
         with open(output_metadata_file, "a") as f:
             for record in output_metadata:
                 f.write(json.dumps(record) + "\n")
@@ -173,6 +156,7 @@ def main() -> None:
 
     except Exception as err:
         logging.exception(f"An unexpected error occurred: {err}")
+
 
 if __name__ == "__main__":
     main()
