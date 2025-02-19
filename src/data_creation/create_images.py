@@ -47,7 +47,7 @@ class DiffusionPipelineWrapper:
             return self.pipeline(
                 prompt=clip_prompt,
                 prompt_3=prompt,
-                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition",
+                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition, cartoonish",
                 num_inference_steps=self.steps,
                 guidance_scale=self.scale,
             )
@@ -56,7 +56,7 @@ class DiffusionPipelineWrapper:
             return self.pipeline(
                 prompt=clip_prompt,
                 prompt_2=prompt,
-                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition",
+                negative_prompt="bad anatomy, poorly drawn face, low resolution, blurry, artifacts, bad lighting, bad composition, cartoonish",
                 num_inference_steps=self.steps,
                 guidance_scale=self.scale,
             )

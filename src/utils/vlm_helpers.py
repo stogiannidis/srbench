@@ -6,14 +6,14 @@ from transformers import (
     AutoProcessor,
     LlavaForConditionalGeneration,
     LlavaNextForConditionalGeneration,
-    PaliGemmaProcessor,
-    PaliGemmaForConditionalGeneration,
     InstructBlipProcessor,
     InstructBlipForConditionalGeneration,
     AutoModelForCausalLM,
     GenerationConfig,
     AutoModelForVision2Seq,
-    MllamaForConditionalGeneration
+    MllamaForConditionalGeneration,
+    AutoModel,  # Added for MiniCPM
+    AutoTokenizer,  # Added for MiniCPM
 )
 from qwen_vl_utils import process_vision_info
 
@@ -25,11 +25,13 @@ class VLMWrapper:
           - Qwen: "Qwen/Qwen2.5-VL-3B-Instruct" or "Qwen/Qwen2.5-VL-7B-Instruct"
           - Llava: "llava-hf/llava-1.5-7b-hf"
           - LlavaNext: "llava-hf/llava-v1.6-mistral-7b-hf"
-          - PaliGemma: "google/paligemma2-3b-pt-896" or "google/paligemma2-10b-pt-896"
           - InstructBlip: "Salesforce/instructblip-vicuna-7b"
           - Molmo: "allenai/Molmo-7B-D-0924"
           - Idefics: "HuggingFaceM4/Idefics3-8B-Llama3"
+          - SmolVLM: "HuggingFaceTB/SmolVLM-Instruct"
           - Mllama: "meta-llama/Llama-3.2-90B-Vision-Instruct"
+          - Phi3.5: "microsoft/Phi-3.5-vision-instruct"
+          - MiniCPM: "openbmb/MiniCPM-V-2_6" (or similar)
         """
         self.model_id = model_id
         self.dtype = torch.bfloat16
@@ -42,8 +44,9 @@ class VLMWrapper:
                 torch_dtype=self.dtype,
                 attn_implementation="flash_attention_2",
                 device_map=self.device_map,
+                vision_config={"torch_dtype": torch.bfloat16},
             ).eval()
-            self.processor = AutoProcessor.from_pretrained(model_id)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
         elif "llava-hf/llava-1.5-7b-hf" in model_id:
             self.model_type = "llava"
             self.model = LlavaForConditionalGeneration.from_pretrained(
@@ -52,24 +55,17 @@ class VLMWrapper:
                 low_cpu_mem_usage=True,
                 device_map=self.device_map,
             ).eval()
-            self.processor = AutoProcessor.from_pretrained(model_id)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
         elif "llava-hf/llava-v1.6-mistral-7b-hf" in model_id:
             self.model_type = "llava_next"
-            self.processor = AutoProcessor.from_pretrained(model_id)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
             self.model = LlavaNextForConditionalGeneration.from_pretrained(
                 model_id,
                 torch_dtype=self.dtype,
                 low_cpu_mem_usage=True,
                 device_map=self.device_map,
             ).eval()
-        elif model_id.startswith("google/paligemma2"):
-            self.model_type = "palgemma"
-            self.model = PaliGemmaForConditionalGeneration.from_pretrained(
-                model_id,
-                torch_dtype=self.dtype,
-                device_map=self.device_map,
-            ).eval()
-            self.processor = PaliGemmaProcessor.from_pretrained(model_id)
+        # Removed Paligemma support
         elif model_id.startswith("Salesforce/instructblip"):
             self.model_type = "instructblip"
             self.model = InstructBlipForConditionalGeneration.from_pretrained(
@@ -77,7 +73,9 @@ class VLMWrapper:
                 torch_dtype=self.dtype,
                 device_map=self.device_map,
             ).eval()
-            self.processor = InstructBlipProcessor.from_pretrained(model_id)
+            self.processor = InstructBlipProcessor.from_pretrained(
+                model_id, use_fast=True
+            )
         elif model_id.startswith("allenai/Molmo"):
             self.model_type = "molmo"
             self.processor = AutoProcessor.from_pretrained(
@@ -85,6 +83,7 @@ class VLMWrapper:
                 trust_remote_code=True,
                 torch_dtype=self.dtype,
                 device_map=self.device_map,
+                use_fast=True,
             )
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
@@ -94,7 +93,16 @@ class VLMWrapper:
             ).eval()
         elif model_id.startswith("HuggingFaceM4/Idefics"):
             self.model_type = "idefics"
-            self.processor = AutoProcessor.from_pretrained(model_id)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+            self.model = AutoModelForVision2Seq.from_pretrained(
+                model_id,
+                torch_dtype=self.dtype,
+                device_map=self.device_map,
+                attn_implementation="flash_attention_2",
+            ).eval()
+        elif model_id.startswith("HuggingFaceTB/SmolVLM-Instruct"):
+            self.model_type = "smolvlm"
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
             self.model = AutoModelForVision2Seq.from_pretrained(
                 model_id,
                 torch_dtype=self.dtype,
@@ -108,12 +116,44 @@ class VLMWrapper:
                 torch_dtype=self.dtype,
                 device_map=self.device_map,
             ).eval()
-            self.processor = AutoProcessor.from_pretrained(model_id)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+        elif model_id.startswith("microsoft/Phi-3.5-vision-instruct"):
+            self.model_type = "phi35"
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id,
+                device_map=self.device_map,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                _attn_implementation="flash_attention_2",
+            ).eval()
+            self.processor = AutoProcessor.from_pretrained(
+                model_id, trust_remote_code=True, num_crops=16
+            )
+        elif model_id.startswith("openbmb/MiniCPM"):
+            self.model_type = "minicpm"
+            self.model = (
+                AutoModel.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    device_map=self.device_map,
+                )
+                .eval()
+            )
+            self.processor = AutoTokenizer.from_pretrained(
+                model_id, trust_remote_code=True, use_fast=True
+            )
         else:
             raise ValueError(f"Unsupported model_id: {model_id}")
 
-        if hasattr(self.processor, "tokenizer") and hasattr(self.model, "generation_config"):
-            self.model.generation_config.pad_token_id = self.processor.tokenizer.pad_token_id
+        # Set pad token if available
+        if hasattr(self.processor, "tokenizer") and hasattr(
+            self.model, "generation_config"
+        ):
+            self.model.generation_config.pad_token_id = (
+                self.processor.tokenizer.pad_token_id
+            )
 
         self.device = self.model.device
 
@@ -121,13 +161,10 @@ class VLMWrapper:
         response = requests.get(image_url, stream=True)
         return Image.open(response.raw)
 
-    def generate_response(
-        self, conversation: list, image_input=None, max_new_tokens=100
-    ):
+    def preprocess(self, conversation: list, image_input=None):
         """
-        conversation: can be a single conversation (list of message dicts) or a batch (list of conversations).
-        image_input: a single PIL Image or a list of PIL Images.
-        Returns a list of generated responses for each batched conversation.
+        Preprocess the conversation and image input.
+        Returns the processed inputs that would normally be passed to the model.
         """
         # Normalize conversation and image_input into batches
         if conversation and isinstance(conversation[0], list):
@@ -136,8 +173,7 @@ class VLMWrapper:
             batch_conversations = [conversation]
 
         if image_input is not None:
-            if isinstance(image_input, list) and not hasattr(image_input[0], "format"):
-                # Already a batch of images
+            if isinstance(image_input, list) and hasattr(image_input[0], "format"):
                 batch_images = image_input
             else:
                 batch_images = [image_input] * len(batch_conversations)
@@ -146,26 +182,21 @@ class VLMWrapper:
 
         if self.model_type == "qwen":
             prompts = [
-                self.processor.apply_chat_template(conv, tokenize=False, add_generation_prompt=True)
+                self.processor.apply_chat_template(
+                    conv, tokenize=False, add_generation_prompt=True
+                )
                 for conv in batch_conversations
             ]
-            image_inputs_list = []
-            video_inputs_list = []
-            for conv in batch_conversations:
-                img, vid = process_vision_info(conv)
-                image_inputs_list.append(img)
-                video_inputs_list.append(vid)
+            image_inputs, _ = process_vision_info(batch_conversations)
             inputs = self.processor(
                 text=prompts,
-                images=image_inputs_list,
-                videos=video_inputs_list,
+                images=image_inputs,
                 padding=True,
                 return_tensors="pt",
             ).to(self.device)
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            return self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+            return inputs
 
-        elif self.model_type in ["mllama"]:
+        elif self.model_type == "mllama":
             prompts = [
                 self.processor.apply_chat_template(conv, add_generation_prompt=True)
                 for conv in batch_conversations
@@ -176,8 +207,7 @@ class VLMWrapper:
                 add_special_tokens=False,
                 return_tensors="pt",
             ).to(self.device)
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            return [self.processor.decode(gid, skip_special_tokens=True) for gid in generated_ids]
+            return inputs
 
         elif self.model_type in ["llava", "llava_next"]:
             prompts = [
@@ -189,82 +219,74 @@ class VLMWrapper:
                 text=prompts,
                 return_tensors="pt",
             ).to(self.device)
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            if self.model_type == "llava":
-                return [self.processor.decode(ids[2:], skip_special_tokens=True) for ids in generated_ids]
-            else:
-                return [self.processor.decode(ids, skip_special_tokens=True) for ids in generated_ids]
+            return inputs
 
-        elif self.model_type == "palgemma":
-            # Using an empty prompt for each conversation
-            inputs = self.processor(
-                text=[""] * len(batch_conversations),
-                images=batch_images,
-                return_tensors="pt",
-            ).to(self.device)
-            input_len = inputs["input_ids"].shape[-1]
-            with torch.inference_mode():
-                generation = self.model.generate(
-                    **inputs, max_new_tokens=max_new_tokens, do_sample=False
+        elif self.model_type == "phi35":
+            processed_inputs_batch = []
+            for conv, image in zip(
+                batch_conversations, batch_images
+            ):  # Iterate over batch
+                placeholder = "<|image_1|>\n"
+                prompt = placeholder + conv[0]["content"][1]["text"]
+                messages = [{"role": "user", "content": prompt}]
+                prompt_text = self.processor.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
                 )
-            results = []
-            for gen in generation:
-                gen_tokens = gen[input_len:]
-                results.append(self.processor.decode(gen_tokens, skip_special_tokens=True))
-            return results
+                processed_input = self.processor(
+                    text=prompt_text, images=image, return_tensors="pt"
+                ).to(self.device)  # Process single example
+                processed_inputs_batch.append(processed_input)
+
+            # Concatenate processed inputs
+            batched_input_ids = torch.cat(
+                [inputs["input_ids"] for inputs in processed_inputs_batch]
+            )
+            batched_attention_mask = torch.cat(
+                [inputs["attention_mask"] for inputs in processed_inputs_batch]
+            )
+            batched_pixel_values = torch.cat(
+                [inputs["pixel_values"] for inputs in processed_inputs_batch]
+            )
+
+            inputs = {
+                "input_ids": batched_input_ids,
+                "attention_mask": batched_attention_mask,
+                "pixel_values": batched_pixel_values,
+            }
+            return inputs
 
         elif self.model_type == "instructblip":
-            prompts = [conv[0]["content"][0]["text"] for conv in batch_conversations]
+            prompts = [conv[0]["content"][1]["text"] for conv in batch_conversations]
             inputs = self.processor(
                 images=batch_images,
                 text=prompts,
                 return_tensors="pt",
             ).to(self.device)
-            outputs = self.model.generate(
-                **inputs,
-                do_sample=False,
-                num_beams=5,
-                max_length=256,
-                min_length=1,
-                top_p=0.9,
-                repetition_penalty=1.5,
-                length_penalty=1.0,
-                temperature=1,
-            )
-            decoded = self.processor.batch_decode(outputs, skip_special_tokens=True)
-            return [d.strip() for d in decoded]
+            return inputs
 
         elif self.model_type == "molmo":
-            prompts = [conv[0]["content"][0]["text"] for conv in batch_conversations]
+            # Build a list of prompt strings (one per conversation)
+            prompts = [
+                " ".join(conv[0]["content"][1]["text"])
+                if isinstance(conv[0]["content"][1]["text"], list)
+                else conv[0]["content"][1]["text"]
+                for conv in batch_conversations
+            ]
             imgs = batch_images if batch_images is not None else None
-            # If a single image was passed, replicate it for the batch
-            if imgs and not isinstance(imgs, list):
-                imgs = [imgs] * len(batch_conversations)
             inputs = self.processor.process(
                 images=imgs,
                 text=prompts,
                 return_tensors="pt",
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            output = self.model.generate_from_batch(
-                inputs,
-                GenerationConfig(max_new_tokens=max_new_tokens, stop_strings="<|endoftext|>"),
-                tokenizer=self.processor.tokenizer,
-            )
-            input_len = inputs["input_ids"].shape[-1]
-            results = []
-            for out in output:
-                generated_tokens = out[input_len:]
-                results.append(self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True))
-            return results
+            return inputs
 
-        elif self.model_type == "idefics":
+        elif self.model_type in ["idefics", "smolvlm"]:
             prompts = [
                 self.processor.apply_chat_template(conv, add_generation_prompt=True)
                 for conv in batch_conversations
             ]
             imgs = batch_images if batch_images is not None else None
-            # Replicate image if necessary:
             if imgs and not isinstance(imgs, list):
                 imgs = [imgs] * len(batch_conversations)
             inputs = self.processor(
@@ -273,19 +295,88 @@ class VLMWrapper:
                 return_tensors="pt",
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-            return self.processor.batch_decode(generated_ids, skip_special_tokens=True)
+            return inputs
+
+        elif self.model_type == "minicpm":
+            msgs = batch_conversations[0]
+            image_arg = batch_images[0] if batch_images else None
+            return (msgs, image_arg)
+
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
+    def decode(self, generated_ids, extra=None):
+        """
+        Decode the generated_ids based on the model type.
+        
+        Params:
+            generated_ids: Output token ids from the model.
+            extra: Additional parameter for decoding (e.g. input length for molmo).
+        
+        Returns:
+            Decoded text as a list of strings.
+        """
+        if self.model_type == "qwen":
+            return self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+        elif self.model_type == "mllama":
+            return [self.processor.decode(g, skip_special_tokens=True) for g in generated_ids]
+        elif self.model_type in ["llava", "llava_next"]:
+            if self.model_type == "llava":
+                return [self.processor.decode(g[2:], skip_special_tokens=True) for g in generated_ids]
+            else:
+                return self.processor.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False
+                )
+        elif self.model_type == "phi35":
+            return self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+        elif self.model_type == "instructblip":
+            decoded = self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+            return [d.strip() for d in decoded]
+        elif self.model_type == "molmo":
+            input_len = extra if extra is not None else 0
+            return [
+                self.processor.tokenizer.decode(g[input_len:], skip_special_tokens=True)
+                for g in generated_ids
+            ]
+        elif self.model_type in ["idefics", "smolvlm"]:
+            return self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+        elif self.model_type == "minicpm":
+            text = ""
+            for t in generated_ids:
+                text += t
+            return [text]
+        else:
+            return self.processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False
+            )
+
+    @torch.inference_mode()
     def __call__(self, **kwargs):
         """
-        Make the wrapper callable so that calling an instance directly delegates
-        to the underlying `generate_response` method.
-        
-        Usage:
-        vlm = VLMWrapper("Qwen/Qwen2.5-VL-7B-Instruct")
-        response = vlm(conversation=conversation, image_input=image_input)
-        
+        Invoke the model's generate method with the provided keyword arguments.
+        Parameters:
+            **kwargs: Arbitrary keyword arguments that are passed directly to the model's generate method.
+        Returns:
+            The output produced by self.model.generate when called with the supplied arguments.
         """
-        return self.generate_response(**kwargs)
+        return self.model.generate(**kwargs)
