@@ -41,9 +41,9 @@ MessageType = Dict[str, str]
 # Constants
 # -------------------------------
 SAVE_DIR = "output/prompts/"
-TRIAL_NAME = "fiveshotv3-prompts-trial"
+TRIAL_NAME = "fiveshotv6-prompts-beam"
 OUTPUT_FILENAME = f"{SAVE_DIR}{TRIAL_NAME}.jsonl"  # All prompts will be appended here.
-PROMPTS_PER_TASK = 12
+PROMPTS_PER_TASK = 25
 # -------------------------------
 # 7. List of Models to Use
 # -------------------------------
@@ -76,39 +76,22 @@ neptune_run["config/models"] = neptune.utils.stringify_unsupported(MODELS)
 # 1. List of Simple Objects with Attributes
 # -------------------------------
 OBJECTS: List[str] = [
-    "apples",
-    "oranges",
-    "bowling ball",
-    "basket ball",
-    "foot ball",
-    "soccer ball",
     "bicycle",
     "motorcycle",
     "scooter",
-    "skateboard",
     "car",
     "truck",
     "bus",
     "train",
-    "man",
-    "woman",
-    "kid",
+    "airplane",
+    "helicopter",
+    "boat",
+    "ship",
     "dog",
     "cat",
     "bird",
     "fish",
-    "tree",
-    "bush",
-    "flower",
-    "grass",
-    "rock",
-    "mountain",
-    "hill",
-    "valley",
-    "river",
-    "lake",
-    "ocean",
-    "sea",
+    "rabbit",
 ]
 
 # -------------------------------
@@ -116,35 +99,48 @@ OBJECTS: List[str] = [
 # -------------------------------
 # Each task now uses a concise definition and an example.
 SPATIAL_TASKS: List[SpatialTaskType] = [
-    # {
-    #     "task_type": "physics and causality",
-    #     "examples": [
-    #         "Two red vibrant apples of the same size falling from different heights surrounded by a soft bokeh of autumn leaves, warm hues of orange and yellow, with the late afternoon sun casting long shadows.",
-    #         "Photograph of a A laptop standing at the edge of a desk ready to fall",
-    #         "Three mugs are stacked on top of each other leaning to the left. One more mug would cause the stack to fall",
-    #         "Two playful dogs, a heartbeat before collision, in a photograph capturing the joyous energy of a candid moment; dynamic, high-resolution, impressionistic style reminiscent of Ed Ruschas street photography.",
-    #         "A bowling ball and a basket ball rolling down a steep hill, bright blue natural light, 35mm photography, wide shot, highly detailed, 8K, art by artgerm and greg rutkowski and alphonse mucha",
-    #     ],
-    # },
     {
-        "task_type": "perspective taking",
+        "task_type": "mental rotation",
         "examples": [
-            "A photograph of a family of four, two adults and two children, standing in a row, with the camera positioned at the height of the children, looking up at the adults, who are smiling down at them.",
-            "Street artist, vividly painting a vibrant mural, surrounded by captivated pedestrians, in a stencil-like graffiti style, with a gritty urban setting, drenched in chiaroscuro lighting for a dramatic and lively atmosphere.",
-            "Vibrant street vendors, laden with an array of ripe fruits, amidst the lively hustle of a farmers market - captured in the style of a vivid, Impressionist oil painting, with warm sunlight filtering through a cloud-speckled sky.",
-            "Scuba diver capturing a vibrant, up-close moment with a majestic sea turtle among intricately detailed, luminous coral reef, in the style of a high-definition underwater photograph blending vivid hues and soft shadows, with a serene, lively atmosphere.",
-            "Toddler and playful puppy in sunlit backyard, chasing iridescent bubbles in whimsical Impressionist style, vibrant colors, tender atmosphere, capturing the joy of childhood and canine companionship.",
+            "A photo-realistic image of a car, viewed from the front, with the wheels turned to the left, parked in a driveway, with a clear blue sky in the background.",
+            "A photo-realistic image of a mug, viewed from the side, with the handle on the right, filled with steaming coffee, on a wooden table, with a window in the background showing a sunny day.",
+            "A photo-realistic image of a laptop, viewed from the back, with the screen open",
+            "A photo-realistic image of a bicycle, viewed from the side, with the front wheel turned to the right, parked on a cobblestone street, with a row of colorful houses in the background.",
+            "A photo-realistic image of a cat, viewed from the front, with the tail curled to the right, sitting on a windowsill, with a potted plant in the background.",
         ],
     },
+    # {
+    #     "task_type": "perspective taking",
+    #     "examples": [
+    #         "A photograph of a family of four, two adults and two children, standing in a row, with the camera positioned at the height of the children, looking up at the adults, who are smiling down at them.",
+    #         "Photograph of street artist, vividly painting a vibrant mural, surrounded by captivated pedestrians, in a stencil-like graffiti style, with a gritty urban setting, drenched in chiaroscuro lighting for a dramatic and lively atmosphere.",
+    #         "Photograph of vibrant street vendors, laden with an array of ripe fruits, amidst the lively hustle of a farmers market - captured in the style of a vivid, Impressionist oil painting, with warm sunlight filtering through a cloud-speckled sky.",
+    #         "Photograph of scuba diver capturing a vibrant, up-close moment with a majestic sea turtle among intricately detailed, luminous coral reef, in the style of a high-definition underwater photograph blending vivid hues and soft shadows, with a serene, lively atmosphere.",
+    #         "Photograph of toddler and playful puppy in sunlit backyard, chasing iridescent bubbles in whimsical Impressionist style, vibrant colors, tender atmosphere, capturing the joy of childhood and canine companionship.",
+    #     ],
+    # },
 ]
 
 # -------------------------------
 # 3. Enhanced System Prompt
 # -------------------------------
 # This prompt instructs the LLM to generate a test prompt for spatial reasoning.
-SYSTEM_PROMPT: str = (
-    "You are helpful AI assistant tasked to help people with their requests."
-)
+SYSTEM_PROMPT: str = """**Role:** Text-Based Image Description Generation Assistant
+
+**Objective:** To generate high-quality text image descriptions for generative models.
+
+**Input (Textual):**
+*  A list of objects (provided as text by the user).
+*  Example image descriptions (provided as text by the user).
+
+**Output (Textual):** New image descriptions (as text).
+
+**Task:** Generate new text image descriptions that meet the following criteria:
+1. **Style Mimicry:** Replicate the writing style, sentence structure, and vocabulary used in the example text descriptions.
+2. **Object Novelty:** Feature the provided list of objects, ensuring they are different from objects explicitly mentioned in the example text descriptions.
+3. **Setting Novelty:** Describe the objects in new and different settings or contexts compared to those presented in the example text descriptions.
+4. **Logical Coherence & Realism:** Ensure all generated text descriptions are logically sound, realistic, and portray plausible scenarios in text. Avoid nonsensical or physically impossible descriptions in text.
+"""
 
 # -------------------------------
 # 4. Function to Construct a Prompt for a Given Task
@@ -164,10 +160,14 @@ def construct_prompt_for_task(task: SpatialTaskType) -> Tuple[str, str]:
     """
     task_type = task["task_type"]
     examples = task["examples"]
-    user_prompt = (
-        f"Here are example prompts for a text-to-image generation model: {examples}.\n"
-        f"Please Generate a prompt based on the examples above using the following objects: {OBJECTS}."
-        "Answer in only the prompt."
+    user_prompt = (f"""Please generate a text-to-image prompt inspired by the following examples and using these objects:
+        **Example Prompts:**
+        {examples}
+
+        **Objects to Include:**
+        {OBJECTS}
+
+        Respond with the brief yet consise generated scene description."""
     )
     return task_type, user_prompt
 
@@ -251,7 +251,10 @@ def main() -> None:
             torch_dtype=torch.bfloat16,
             return_full_text=False,
             do_sample=True,
+            temperature=1,
             top_k=10,
+            top_p=0.9,
+            num_beams=10,
         )
         eos_token_id = llm_pipe.tokenizer.eos_token_id
         logger.info("Pipeline initialized for %s", sanitized_model)
@@ -275,7 +278,7 @@ def main() -> None:
                 # Generate the scene description using the LLM.
                 outputs: Any = llm_pipe(
                     prompt_input,
-                    max_new_tokens=2048,
+                    max_new_tokens=1024,
                     pad_token_id=eos_token_id,
                 )
                 generated_text: str = extract_generated_text(outputs)

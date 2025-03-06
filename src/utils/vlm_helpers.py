@@ -1,19 +1,20 @@
+import re
 import torch
 import requests
 from PIL import Image
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    AutoProcessor,
-    LlavaForConditionalGeneration,
-    LlavaNextForConditionalGeneration,
-    InstructBlipProcessor,
-    InstructBlipForConditionalGeneration,
-    AutoModelForCausalLM,
-    GenerationConfig,
-    AutoModelForVision2Seq,
-    MllamaForConditionalGeneration,
-    AutoModel,  # Added for MiniCPM
-    AutoTokenizer,  # Added for MiniCPM
+	Qwen2_5_VLForConditionalGeneration,
+	AutoProcessor,
+	LlavaForConditionalGeneration,
+	LlavaNextForConditionalGeneration,
+	InstructBlipProcessor,
+	InstructBlipForConditionalGeneration,
+	AutoModelForCausalLM,
+	GenerationConfig,
+	AutoModelForVision2Seq,
+	MllamaForConditionalGeneration,
+	AutoModel,  # Added for MiniCPM
+	AutoTokenizer,  # Added for MiniCPM
 )
 from qwen_vl_utils import process_vision_info
 
@@ -23,13 +24,13 @@ class VLMWrapper:
         """
         model_id: exact model identifier (e.g.)
           - Qwen: "Qwen/Qwen2.5-VL-3B-Instruct" or "Qwen/Qwen2.5-VL-7B-Instruct"
-          - Llava: "llava-hf/llava-1.5-7b-hf"
+         - Llava: "llava-hf/llava-1.5-7b-hf"
           - LlavaNext: "llava-hf/llava-v1.6-mistral-7b-hf"
           - InstructBlip: "Salesforce/instructblip-vicuna-7b"
           - Molmo: "allenai/Molmo-7B-D-0924"
           - Idefics: "HuggingFaceM4/Idefics3-8B-Llama3"
           - SmolVLM: "HuggingFaceTB/SmolVLM-Instruct"
-          - Mllama: "meta-llama/Llama-3.2-90B-Vision-Instruct"
+          - Mllama: "meta-llama/Llama-3.2-11B-Vision-Instruct"
           - Phi3.5: "microsoft/Phi-3.5-vision-instruct"
           - MiniCPM: "openbmb/MiniCPM-V-2_6" (or similar)
         """
@@ -44,9 +45,10 @@ class VLMWrapper:
                 torch_dtype=self.dtype,
                 attn_implementation="flash_attention_2",
                 device_map=self.device_map,
-                vision_config={"torch_dtype": torch.bfloat16},
             ).eval()
             self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+            # Ensure tokenizer uses left padding for batched generation with Flash Attention
+            self.processor.tokenizer.padding_side = "left"
         elif "llava-hf/llava-1.5-7b-hf" in model_id:
             self.model_type = "llava"
             self.model = LlavaForConditionalGeneration.from_pretrained(
@@ -100,9 +102,11 @@ class VLMWrapper:
                 device_map=self.device_map,
                 attn_implementation="flash_attention_2",
             ).eval()
-        elif model_id.startswith("HuggingFaceTB/SmolVLM-Instruct"):
+        elif model_id.startswith("HuggingFaceTB/SmolVLM"):
             self.model_type = "smolvlm"
-            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+            self.processor = AutoProcessor.from_pretrained(
+                model_id, use_fast=True, padding_side="left"
+            )
             self.model = AutoModelForVision2Seq.from_pretrained(
                 model_id,
                 torch_dtype=self.dtype,
@@ -116,7 +120,7 @@ class VLMWrapper:
                 torch_dtype=self.dtype,
                 device_map=self.device_map,
             ).eval()
-            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True)
+            self.processor = AutoProcessor.from_pretrained(model_id, use_fast=True, padding_side="left")
         elif model_id.startswith("microsoft/Phi-3.5-vision-instruct"):
             self.model_type = "phi35"
             self.model = AutoModelForCausalLM.from_pretrained(
@@ -131,18 +135,15 @@ class VLMWrapper:
             )
         elif model_id.startswith("openbmb/MiniCPM"):
             self.model_type = "minicpm"
-            self.model = (
-                AutoModel.from_pretrained(
-                    model_id,
-                    trust_remote_code=True,
-                    torch_dtype=torch.bfloat16,
-                    attn_implementation="flash_attention_2",
-                    device_map=self.device_map,
-                )
-                .eval()
-            )
+            self.model = AutoModel.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+                device_map=self.device_map,
+            ).eval()
             self.processor = AutoTokenizer.from_pretrained(
-                model_id, trust_remote_code=True, use_fast=True
+                model_id, trust_remote_code=True
             )
         else:
             raise ValueError(f"Unsupported model_id: {model_id}")
@@ -206,6 +207,8 @@ class VLMWrapper:
                 prompts,
                 add_special_tokens=False,
                 return_tensors="pt",
+                padding=True,
+                truncation=True,
             ).to(self.device)
             return inputs
 
@@ -218,6 +221,8 @@ class VLMWrapper:
                 images=batch_images,
                 text=prompts,
                 return_tensors="pt",
+                padding=True,
+                truncation=True,
             ).to(self.device)
             return inputs
 
@@ -261,6 +266,8 @@ class VLMWrapper:
                 images=batch_images,
                 text=prompts,
                 return_tensors="pt",
+                padding=True,
+                truncation=True,
             ).to(self.device)
             return inputs
 
@@ -277,6 +284,8 @@ class VLMWrapper:
                 images=imgs,
                 text=prompts,
                 return_tensors="pt",
+                padding=True,
+                truncation=True,
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             return inputs
@@ -293,6 +302,8 @@ class VLMWrapper:
                 text=prompts,
                 images=imgs,
                 return_tensors="pt",
+                padding=True,
+                truncation=True,
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             return inputs
@@ -308,42 +319,48 @@ class VLMWrapper:
     def decode(self, generated_ids, extra=None):
         """
         Decode the generated_ids based on the model type.
-        
+
         Params:
-            generated_ids: Output token ids from the model.
-            extra: Additional parameter for decoding (e.g. input length for molmo).
-        
+                generated_ids: Output token ids from the model.
+                extra: Additional parameter for decoding (e.g. input length for molmo).
+
         Returns:
-            Decoded text as a list of strings.
+                Decoded text as a list of strings.
         """
         if self.model_type == "qwen":
             return self.processor.batch_decode(
                 generated_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                clean_up_tokenization_spaces=False,
             )
         elif self.model_type == "mllama":
-            return [self.processor.decode(g, skip_special_tokens=True) for g in generated_ids]
+            return [
+                self.processor.decode(g, skip_special_tokens=True)
+                for g in generated_ids
+            ]
         elif self.model_type in ["llava", "llava_next"]:
             if self.model_type == "llava":
-                return [self.processor.decode(g[2:], skip_special_tokens=True) for g in generated_ids]
+                return [
+                    self.processor.decode(g[2:], skip_special_tokens=True)
+                    for g in generated_ids
+                ]
             else:
                 return self.processor.batch_decode(
                     generated_ids,
                     skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False
+                    clean_up_tokenization_spaces=False,
                 )
         elif self.model_type == "phi35":
             return self.processor.batch_decode(
                 generated_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                clean_up_tokenization_spaces=False,
             )
         elif self.model_type == "instructblip":
             decoded = self.processor.batch_decode(
                 generated_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                clean_up_tokenization_spaces=False,
             )
             return [d.strip() for d in decoded]
         elif self.model_type == "molmo":
@@ -356,7 +373,7 @@ class VLMWrapper:
             return self.processor.batch_decode(
                 generated_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                clean_up_tokenization_spaces=False,
             )
         elif self.model_type == "minicpm":
             text = ""
@@ -367,16 +384,96 @@ class VLMWrapper:
             return self.processor.batch_decode(
                 generated_ids,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False
+                clean_up_tokenization_spaces=False,
             )
 
     @torch.inference_mode()
-    def __call__(self, **kwargs):
+    def __call__(self, *args, **kwargs):
         """
         Invoke the model's generate method with the provided keyword arguments.
         Parameters:
-            **kwargs: Arbitrary keyword arguments that are passed directly to the model's generate method.
+                **kwargs: Arbitrary keyword arguments that are passed directly to the model's generate method.
         Returns:
-            The output produced by self.model.generate when called with the supplied arguments.
+                The output produced by self.model.generate when called with the supplied arguments.
         """
+        if self.model_type == "minicpm":
+            return self.model.chat(*args, tokenizer=self.processor._tokenizer)
         return self.model.generate(**kwargs)
+
+
+
+def extract_answer(text):
+    """
+    Extract the final answer ID (A, B, C, etc.) from an LLM's output,
+    removing everything before the first occurrence of prefixes like "Assistant", "ASSISTANT", or "[INST]".
+
+    Args:
+        text (str): The LLM-generated text.
+
+    Returns:
+        str or None: The extracted answer ID or None if not found.
+    """
+    prefixes_to_remove_before = ["Assistant", "ASSISTANT", "[INST]", "assistant"]
+    min_index = len(text) # Initialize to length of text, assuming no prefix found initially
+
+    for prefix in prefixes_to_remove_before:
+        index = text.lower().find(prefix.lower())
+        if index != -1: # Prefix found
+            min_index = min(min_index, index) # Keep track of the smallest index
+
+    if min_index != len(text): # If a prefix was found
+        text = text[min_index:] # Remove everything before the first prefix
+
+    # First check for simple direct answer format: "A. Option" or just "A"
+    direct_match = re.search(r'\b([A-Z])(?:\.|:|\))?(?:\s|$)', text)
+    if direct_match:
+        return direct_match.group(1)
+
+    # Phrases that typically precede the answer (e.g., "the answer is A")
+    before_phrases = [
+        "the answer is",
+        "i think it's",
+        "i choose",
+        "i'll go with",
+        "it's",
+        "the correct choice is",
+        "my answer is",
+        "i believe it's", 
+        "i select",
+        "the best answer is",
+    ]
+    # Phrases that typically follow the answer (e.g., "A is the answer")
+    after_phrases = [
+        "is the answer",
+        "is correct",
+        "is the correct choice",
+        "is right",
+        "is the best answer",
+        "is the right choice",
+    ]
+
+    # Compile regex patterns
+    before_pattern = (
+        r"(?:" + "|".join(re.escape(p) for p in before_phrases) + r")\s*([A-Z])"
+    )
+    after_pattern = (
+        r"([A-Z])\s*(?:" + "|".join(re.escape(p) for p in after_phrases) + r")"
+    )
+    before_regex = re.compile(before_pattern, re.IGNORECASE)
+    after_regex = re.compile(after_pattern, re.IGNORECASE)
+
+    # Find all matches
+    matches = list(before_regex.finditer(text)) + list(after_regex.finditer(text))
+
+    if matches:
+        # Sort matches by their starting position
+        matches.sort(key=lambda m: m.start())
+        # Return the answer letter from the last match
+        return matches[-1].group(1)
+    else:
+        # Fallback: find the last standalone uppercase letter
+        fallback_matches = re.findall(r"\b[A-Z]\b", text)
+        if fallback_matches:
+            return fallback_matches[-1]
+        else:
+            return ""  # No answer found

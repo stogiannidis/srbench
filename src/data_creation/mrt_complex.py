@@ -5,7 +5,7 @@ import argparse
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-
+from matplotlib.patches import Rectangle  # For drawing rectangles
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.gridspec import GridSpec
 
@@ -21,15 +21,6 @@ SHAPES = {
         (2, 2, 1),
         (2, 2, 2),
         (2, 3, 2),
-    ],
-    "Branch": [  # A branching polycube.
-        (0, 0, 0),
-        (1, 0, 0),
-        (2, 0, 0),
-        (3, 0, 0),
-        (1, 1, 0),
-        (2, 1, 0),
-        (2, 1, 1),
     ],
     "Zigzag": [  # A zigzag polycube.
         (0, 0, 0),
@@ -51,41 +42,6 @@ SHAPES = {
         (1, 2, 1),
         (1, 3, 1),
         (1, 3, 2),
-    ],
-    "SnakeComplex2": [  # Another complex snake-like shape.
-        (0, 0, 0),
-        (1, 0, 0),
-        (1, 1, 0),
-        (1, 1, 1),
-        (2, 1, 1),
-        (2, 2, 1),
-        (2, 2, 2),
-        (3, 2, 2),
-        (3, 3, 2),
-    ],
-    "ComplexZigzag": [  # A more intricate zigzag shape.
-        (0, 0, 0),
-        (1, 0, 0),
-        (1, 1, 0),
-        (2, 1, 0),
-        (2, 1, 1),
-        (3, 1, 1),
-        (3, 2, 1),
-        (3, 2, 2),
-        (4, 2, 2),
-        (4, 3, 2),
-    ],
-    "WindingSnake": [  # A winding snake with a maze-like path.
-        (0, 0, 0),
-        (1, 0, 0),
-        (1, 1, 0),
-        (1, 1, 1),
-        (0, 1, 1),
-        (0, 2, 1),
-        (1, 2, 1),
-        (1, 2, 2),
-        (2, 2, 2),
-        (2, 3, 2),
     ],
     "HookedCorner": [  # Formerly shapeB: a horizontal bar that hooks upward.
         (0, 0, 0),
@@ -123,7 +79,7 @@ SHAPES = {
         (1, 0, 0),
         (2, 0, 0),
         (3, 0, 0),
-        (0, 0, 0),  # Duplicate coordinate is acceptable.
+        (0, 0, 0),
         (0, 1, 0),
         (0, 2, 0),
     ],
@@ -135,10 +91,13 @@ SIMILAR_MAPPING = {
     key: [s for s in all_shape_keys if s != key] for key in all_shape_keys
 }
 
+OUTDIR = "data/mrt/complex"
+
 
 def set_axes_equal(ax, all_vertices):
     """
     Make the aspect ratio of the 3D plot equal so our shape is not distorted.
+    Remove the 3D cartesian axes by hiding panes, grid lines, and axis lines.
     """
     all_vertices = np.array(all_vertices)
     x_limits = [np.min(all_vertices[:, 0]), np.max(all_vertices[:, 0])]
@@ -155,10 +114,21 @@ def set_axes_equal(ax, all_vertices):
     ax.set_ylim(y_mid - max_range / 2, y_mid + max_range / 2)
     ax.set_zlim(z_mid - max_range / 2, z_mid + max_range / 2)
     ax.set_box_aspect([1, 1, 1])
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-    ax.set_axis_off()
+    # Set a few ticks for reference.
+    ax.set_xticks(np.linspace(x_limits[0], x_limits[1], 5))
+    ax.set_yticks(np.linspace(y_limits[0], y_limits[1], 5))
+    ax.set_zticks(np.linspace(z_limits[0], z_limits[1], 5))
+    # Remove tick labels.
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+    ax.set_zticklabels([])
+    # Remove the 3D panes and grid.
+    ax.xaxis.pane.set_visible(False)
+    ax.yaxis.pane.set_visible(False)
+    ax.zaxis.pane.set_visible(False)
+    ax.grid(False)
+    # Remove axis lines.
+    ax._axis3don = False
 
 
 def cube_vertices(origin, size=1.0):
@@ -180,10 +150,10 @@ def cube_vertices(origin, size=1.0):
     )
 
 
-def plot_cubes(ax, vertices, title=""):
+def plot_cubes(ax, vertices, title="", facecolor="white"):
     """
     Plot each cube face-by-face using its 8 vertices.
-    The subplot title is generic (e.g. "Candidate 1") without revealing transformation details.
+    The subplot title is generic (e.g. "Option A") without revealing transformation details.
     """
     n_cubes = len(vertices) // 8
     vertices_reshaped = vertices.reshape((n_cubes, 8, 3))
@@ -199,7 +169,7 @@ def plot_cubes(ax, vertices, title=""):
         for face in faces:
             polygon = Poly3DCollection(
                 [cube_verts[face]],
-                facecolors="white",
+                facecolors=facecolor,
                 edgecolors="black",
                 alpha=1.0,
             )
@@ -238,11 +208,11 @@ def transform_rotate(vertices):
     """
     Rotate the shape randomly and return the new vertex array.
     (This is our correct candidate transformation.)
-    Uses rotation angles from 0° to 360° for each axis.
+    Uses rotation angles from a subset of possible angles.
     """
-    angle_x = np.deg2rad(np.random.uniform(0, 360))
-    angle_y = np.deg2rad(np.random.uniform(0, 360))
-    angle_z = np.deg2rad(np.random.uniform(0, 360))
+    angle_x = np.deg2rad(np.random.choice([0, 60, 90, 120]))
+    angle_y = np.deg2rad(np.random.choice([0, 60, 90, 120]))
+    angle_z = np.deg2rad(np.random.choice([0, 60, 90, 120]))
     Rx = np.array(
         [
             [1, 0, 0],
@@ -308,15 +278,16 @@ def get_visually_similar_candidate(chosen_shape_name, original_vertices, cube_si
     return None
 
 
-def generate_one_image(index):
+def generate_one_image(index, facecolor="white"):
     """
     Generate a single image with a complex polycube shape and four candidate rotations.
     The correct candidate is produced by a pure rotation of the original shape.
     Three wrong candidates are produced:
-      - Two by mirroring the original shape (each rotated).
+      - One by mirroring the original shape (then rotated).
       - One by using a similar object (from the mapping, rotated).
+      - One by a second mirrored-rotated transformation.
     The candidate order is shuffled and no transformation details are displayed.
-    Metadata is appended to metadata.jsonl.
+    Metadata is saved to metadata.jsonl.
     """
     cube_size = 1.0
     shapes_list = list(SHAPES.keys())
@@ -326,57 +297,58 @@ def generate_one_image(index):
     # Correct candidate: pure rotation.
     correct_candidate = get_transformed_candidate(transform_rotate, original_vertices)
 
-    # Wrong candidate 1: mirror the original shape, then rotate.
-    mirror_candidate1 = get_transformed_candidate(
+    # Wrong candidate: mirror the original shape.
+    mirror_candidate = get_transformed_candidate(
         transform_rotate, transform_mirror(original_vertices)
     )
 
-    # Wrong candidate 2: generate another mirrored candidate.
-    mirror_candidate2 = get_transformed_candidate(
-        transform_rotate, transform_mirror(original_vertices)
-    )
-
-    # Wrong candidate 3: similar object from mapping.
+    # Wrong candidate: similar object from mapping.
     similar_candidate = get_visually_similar_candidate(
         shape_name, original_vertices, cube_size
     )
     if similar_candidate is None:
-        # Fallback: if no similar candidate is found, use a mirrored candidate.
-        similar_candidate = mirror_candidate1
+        similar_candidate = mirror_candidate
+
+    # Additional wrong candidate: another mirrored-rotated version.
+    mirror_candidate2 = get_transformed_candidate(
+        transform_rotate, transform_mirror(original_vertices)
+    )
 
     candidates = [
         ("rotate", correct_candidate),
-        ("mirror", mirror_candidate1),
-        ("mirror", mirror_candidate2),
+        ("mirror", mirror_candidate),
         ("similar", similar_candidate),
+        ("mirror2", mirror_candidate2),
     ]
     random.shuffle(candidates)
     correct_candidate_index = [
         i for i, cand in enumerate(candidates) if cand[0] == "rotate"
     ][0]
 
-    fig = plt.figure(figsize=(16, 8))
-    gs = GridSpec(2, 4, height_ratios=[1, 1], wspace=0.3, hspace=0.3)
+    # Use a larger figure with 4 candidate options.
+    fig = plt.figure(figsize=(12, 8))
+    gs = GridSpec(2, 4, height_ratios=[0.5, 1], wspace=0.1, hspace=0.1)
 
     ax_orig = fig.add_subplot(gs[0, :], projection="3d")
-    plot_cubes(ax_orig, original_vertices, title="Original Shape")
+    plot_cubes(ax_orig, original_vertices, title="Original Shape", facecolor=facecolor)
 
     for i in range(4):
         ax = fig.add_subplot(gs[1, i], projection="3d")
         _, candidate_vertices = candidates[i]
-        plot_cubes(ax, candidate_vertices, title=f"Candidate {i + 1}")
+        plot_cubes(
+            ax, candidate_vertices, title=f"Option {chr(65 + i)}", facecolor=facecolor
+        )
 
-    filename = f"{shape_name}_mrt_{index}.png"
-    outdir = "mrt_images"
-    os.makedirs(outdir, exist_ok=True)
+    filename = f"{index}_{shape_name}.png"
+    outdir = OUTDIR
     output_path = os.path.join(outdir, filename)
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", pad_inches=0)
+    plt.savefig(output_path, dpi=60, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
 
     metadata = {
         "filename": filename,
         "candidate_order": [tag for tag, _ in candidates],
-        "correct_candidate": correct_candidate_index + 1,
+        "answer": chr(65 + correct_candidate_index),
     }
     with open(os.path.join(outdir, "metadata.jsonl"), "a") as f:
         f.write(json.dumps(metadata) + "\n")
@@ -389,9 +361,33 @@ def main():
     parser.add_argument(
         "--num_images", "-n", type=int, default=1, help="Number of images to generate."
     )
+    parser.add_argument(
+        "--color", "-c", type=str, default="white", help="Color for the polycubes."
+    )
+    parser.add_argument(
+        "--seed", "-s", type=int, default=69, help="Seed for reproducible results."
+    )
+    parser.add_argument(
+        "--outdir",
+        "-o",
+        type=str,
+        default="data/mrt/complex",
+        help="Output directory for images and metadata.",
+    )
+
     args = parser.parse_args()
+
+    global OUTDIR
+    OUTDIR = args.outdir
+    os.makedirs(OUTDIR, exist_ok=True)
+
+    # Set the seed for reproducibility if provided.
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+
     for i in range(args.num_images):
-        generate_one_image(i)
+        generate_one_image(i, facecolor=args.color)
 
 
 if __name__ == "__main__":

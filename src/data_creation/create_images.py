@@ -2,12 +2,12 @@ import os
 import json
 import torch
 import logging
-from diffusers import FluxPipeline, StableDiffusion3Pipeline
+from diffusers import FluxPipeline, StableDiffusion3Pipeline, DiffusionPipeline
 
 # Configure logging
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "app.log")
+LOG_FILE = os.path.join(LOG_DIR, "image_creation.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -52,7 +52,6 @@ class DiffusionPipelineWrapper:
                 guidance_scale=self.scale,
             )
         elif isinstance(self.pipeline, FluxPipeline):
-            logging.info("Using FLUX.1-dev: sending full prompt as 'prompt_2'.")
             return self.pipeline(
                 prompt=clip_prompt,
                 prompt_2=prompt,
@@ -64,9 +63,6 @@ class DiffusionPipelineWrapper:
             raise ValueError("Unsupported pipeline type.")
 
     def generate_image(self, prompt: str, output_filename: str, output_dir: str) -> str:
-        logging.info(
-            f"Generating image with prompt (first 30 chars): '{prompt[:30]}...'"
-        )
         with torch.no_grad():
             result = self._call_pipeline(prompt)
             image = result.images[0]
@@ -81,15 +77,13 @@ class DiffusionPipelineWrapper:
 
     @staticmethod
     def load_metadata_from_json(json_path: str):
-        logging.info(f"Loading metadata from {json_path}")
         with open(json_path, "r") as f:
             data = [json.loads(line.strip()) for line in f if line.strip()]
-        logging.info(f"Loaded {len(data)} metadata items.")
         return data
 
 
 def main():
-    logging.info("Starting image generation process using DiffusionPipelineWrapper.")
+    logging.info("\n\nStarting image generation process using DiffusionPipelineWrapper.")
     try:
         diffusion_models = [
             {"model_id": "black-forest-labs/FLUX.1-dev", "steps": 50, "scale": 7.5},
@@ -99,8 +93,8 @@ def main():
                 "scale": 7.5,
             },
         ]
-        json_file = "output/prompts/fiveshotv3-prompts-trial.jsonl"
-        base_output_dir = "output/images" + json_file.split("/")[-1].split("-")[0]
+        json_file = "output/prompts/claude3.7-prompt.jsonl"
+        base_output_dir = "output/images_" + json_file.split("/")[-1].split("-")[0]
         metadata_list = DiffusionPipelineWrapper.load_metadata_from_json(json_file)
         if not metadata_list:
             logging.error("No metadata found in the JSON file.")
@@ -144,9 +138,6 @@ def main():
                     "scale": scale,
                 }
                 output_metadata.append(record)
-                logging.info(
-                    f"Generated image for prompt index {idx} using model '{model_id}'."
-                )
 
         output_metadata_file = f"metadata_{json_file.split('/')[-1].split('-')[0]}.jsonl"
         with open(output_metadata_file, "a") as f:

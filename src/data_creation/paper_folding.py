@@ -1,392 +1,449 @@
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import matplotlib.gridspec as gridspec
-import argparse
+from PIL import Image, ImageDraw, ImageFont
 import random
+import argparse
 import os
-import itertools
-import math
 import json
+import math
+from collections import defaultdict
 
-# --- Helper functions for polygon clipping, area, and sampling ---
+OUTPUT_DIR = "data/pf"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def clip_polygon(poly, f):
+def draw_paper(draw):
+    """Draw a 100x100 white square paper with a black outline."""
+    draw.rectangle((10, 10, 110, 110), outline="black", fill="white")
+
+
+def draw_dashed_vertical(draw, x, y1, y2, dash_length=4, gap_length=4):
+    y = y1
+    while y < y2:
+        draw.line([(x, y), (x, min(y + dash_length, y2))], fill="black", width=1)
+        y += dash_length + gap_length
+
+
+def draw_dashed_horizontal(draw, y, x1, x2, dash_length=4, gap_length=4):
+    x = x1
+    while x < x2:
+        draw.line([(x, y), (min(x + dash_length, x2), y)], fill="black", width=1)
+        x += dash_length + gap_length
+
+
+def draw_dashed_diagonal(draw, x1, y1, x2, y2, dash_length=4, gap_length=4):
+    total_length = x2 - x1
+    pos = 0
+    while pos < total_length:
+        dash_end = min(pos + dash_length, total_length)
+        draw.line(
+            [(x1 + pos, y1 + pos), (x1 + dash_end, y1 + dash_end)],
+            fill="black",
+            width=1,
+        )
+        pos += dash_length + gap_length
+
+
+def draw_dashed_negative_diagonal(draw, x1, y1, x2, y2, dash_length=4, gap_length=4):
+    total_length = x1 - x2
+    pos = 0
+    while pos < total_length:
+        dash_end = min(pos + dash_length, total_length)
+        draw.line(
+            [(x1 - pos, y1 + pos), (x1 - dash_end, y1 + dash_end)],
+            fill="black",
+            width=1,
+        )
+        pos += dash_length + gap_length
+
+
+def draw_shading(draw, folds):
+    for fold in folds:
+        if fold == "V":
+            draw.rectangle((10, 10, 60, 110), fill="lightgray", outline="black")
+        elif fold == "H":
+            draw.rectangle((10, 10, 110, 60), fill="lightgray", outline="black")
+        elif fold == "D":
+            draw.polygon(
+                [(10, 110), (10, 10), (110, 110)], fill="lightgray", outline="black"
+            )
+        elif fold == "N":
+            draw.polygon(
+                [(110, 110), (10, 110), (110, 10)], fill="lightgray", outline="black"
+            )
+
+
+def draw_holes(draw, holes):
     """
-    Clips a convex polygon (list of (x,y) vertices in order) with the half‐plane f(p) <= 0.
-    Returns the new polygon (as a list of (x,y)).
-    f is a function that computes a signed value.
+    Draw holes as small circles. If duplicate coordinates occur,
+    offset them slightly in a circular pattern so that all are visible.
     """
-    if not poly:
-        return []
+    groups = defaultdict(list)
+    # Group holes by rounded coordinates.
+    for h in holes:
+        key = (round(h[0], 1), round(h[1], 1))
+        groups[key].append(h)
+    for key, group in groups.items():
+        n = len(group)
+        if n == 1:
+            x, y = group[0]
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill="black")
+        else:
+            # Distribute duplicates in a circle of small radius.
+            radius_offset = 2
+            for i, h in enumerate(group):
+                angle = 2 * math.pi * i / n
+                offset_x = radius_offset * math.cos(angle)
+                offset_y = radius_offset * math.sin(angle)
+                x, y = h[0] + offset_x, h[1] + offset_y
+                draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill="black")
+
+
+# Reflection logic as in your original code.
+fold_reflections = {
+    "V": lambda p: (120 - p[0], p[1]),  # Reflect over x=60
+    "H": lambda p: (p[0], 120 - p[1]),  # Reflect over y=60
+    "D": lambda p: (p[1], p[0]),  # Reflect over diagonal y=x
+    "N": lambda p: (120 - p[1], 120 - p[0]),  # Reflect about y=-x through (60,60)
+}
+
+
+def compute_all_layers(punched_holes, folds):
+    """
+    Compute unfolded holes by doubling the layers for each fold.
+    Each fold produces two layers from every existing layer.
+    """
+    layers = [punched_holes]
+    for fold in folds:
+        new_layers = []
+        for layer in layers:
+            new_layers.append(layer)
+            new_layers.append([fold_reflections[fold](h) for h in layer])
+        layers = new_layers
+    # Flatten layers; note that duplicates are allowed.
+    return [h for layer in layers for h in layer]
+
+
+# Helper function: point in polygon using ray-casting.
+def point_in_poly(x, y, poly):
+    num = len(poly)
+    j = num - 1
+    c = False
+    for i in range(num):
+        if ((poly[i][1] > y) != (poly[j][1] > y)) and (
+            x
+            < (poly[j][0] - poly[i][0])
+            * (y - poly[i][1])
+            / (poly[j][1] - poly[i][1] + 1e-10)
+            + poly[i][0]
+        ):
+            c = not c
+        j = i
+    return c
+
+
+def generate_hole_in_poly(poly, margin=5):
+    """
+    Generate a random point (hole) within the polygon 'poly',
+    ensuring it lies at least 'margin' away from the polygon's bounding box edges.
+    """
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    bx_min, bx_max = min(xs) + margin, max(xs) - margin
+    by_min, by_max = min(ys) + margin, max(ys) - margin
+    while True:
+        x = random.uniform(bx_min, bx_max)
+        y = random.uniform(by_min, by_max)
+        if point_in_poly(x, y, poly):
+            return (int(round(x)), int(round(y)))
+
+
+# Modified clip_polygon: force the fold to occur at the midpoint.
+def clip_polygon(poly, fold):
     new_poly = []
-    n = len(poly)
-    for i in range(n):
-        p_curr = poly[i]
-        p_next = poly[(i + 1) % n]
-        f_curr = f(p_curr)
-        f_next = f(p_next)
-        if f_curr <= 0:
-            new_poly.append(p_curr)
-        if f_curr * f_next < 0:
-            t = f_curr / (f_curr - f_next)
-            inter_x = p_curr[0] + t * (p_next[0] - p_curr[0])
-            inter_y = p_curr[1] + t * (p_next[1] - p_curr[1])
-            new_poly.append((inter_x, inter_y))
+    if fold == "V":
+        bx_min = min(p[0] for p in poly)
+        bx_max = max(p[0] for p in poly)
+        mid = (bx_min + bx_max) / 2
+        inside = lambda p: p[0] >= mid
+
+        def compute_intersection(p1, p2):
+            t = (mid - p1[0]) / (p2[0] - p1[0])
+            return (mid, p1[1] + t * (p2[1] - p1[1]))
+    elif fold == "H":
+        by_min = min(p[1] for p in poly)
+        by_max = max(p[1] for p in poly)
+        mid = (by_min + by_max) / 2
+        inside = lambda p: p[1] >= mid
+
+        def compute_intersection(p1, p2):
+            t = (mid - p1[1]) / (p2[1] - p1[1])
+            return (p1[0] + t * (p2[0] - p1[0]), mid)
+    elif fold == "D":
+        bx_min = min(p[0] for p in poly)
+        bx_max = max(p[0] for p in poly)
+        by_min = min(p[1] for p in poly)
+        by_max = max(p[1] for p in poly)
+        cx = (bx_min + bx_max) / 2
+        cy = (by_min + by_max) / 2
+        b = cy - cx  # fold-line: y = x + (cy - cx)
+        if sum(1 for p in poly if abs(p[1] - (p[0] + b)) < 1e-3) >= 2:
+            return clip_polygon(poly, "N")
+        inside = lambda p: p[1] <= p[0] + b
+
+        def compute_intersection(p1, p2):
+            denom = (p2[0] - p1[0]) - (p2[1] - p1[1])
+            if denom == 0:
+                return p1
+            t = (p1[1] - p1[0] - b) / denom
+            return (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1]))
+    elif fold == "N":
+        bx_min = min(p[0] for p in poly)
+        bx_max = max(p[0] for p in poly)
+        by_min = min(p[1] for p in poly)
+        by_max = max(p[1] for p in poly)
+        cx = (bx_min + bx_max) / 2
+        cy = (by_min + by_max) / 2
+        inside = lambda p: (p[0] + p[1]) <= (cx + cy)
+
+        def compute_intersection(p1, p2):
+            denom = (p2[0] - p1[0]) + (p2[1] - p1[1])
+            if denom == 0:
+                return p1
+            t = ((cx + cy) - (p1[0] + p1[1])) / denom
+            return (p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1]))
+    else:
+        return poly
+
+    for i in range(len(poly)):
+        curr = poly[i]
+        prev = poly[i - 1]
+        if inside(curr):
+            if not inside(prev):
+                new_poly.append(compute_intersection(prev, curr))
+            new_poly.append(curr)
+        elif inside(prev):
+            new_poly.append(compute_intersection(prev, curr))
     return new_poly
 
 
-def polygon_area(poly):
-    """Compute the area of a polygon using the shoelace formula."""
-    area = 0
-    n = len(poly)
-    for i in range(n):
-        x1, y1 = poly[i]
-        x2, y2 = poly[(i + 1) % n]
-        area += x1 * y2 - y1 * x2
-    return abs(area) / 2.0
+# Global list to collect final view images for each fold.
+process_images = []
 
 
-def polygon_bounding_box(poly):
-    xs = [p[0] for p in poly]
-    ys = [p[1] for p in poly]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def sample_point_in_polygon(poly):
+def recursive_fold(current_folds, idx, poly):
     """
-    Samples a random point uniformly in a convex polygon.
-    The polygon is triangulated by taking the first vertex and all consecutive pairs.
-    Then a triangle is chosen with probability proportional to its area.
+    Recursively generate the final folded view for each fold.
+    'poly' represents the current visible paper shape.
+    Only the final view after each fold is saved.
+    Returns the final polygon after all folds.
     """
-    if len(poly) < 3:
-        return poly[0]
-    triangles = []
-    areas = []
-    A = poly[0]
-    for i in range(1, len(poly) - 1):
-        B = poly[i]
-        C = poly[i + 1]
-        triangles.append((A, B, C))
-        area = abs((B[0] - A[0]) * (C[1] - A[1]) - (B[1] - A[1]) * (C[0] - A[0])) / 2.0
-        areas.append(area)
-    total_area = sum(areas)
-    r = random.uniform(0, total_area)
-    cum = 0
-    chosen = triangles[0]
-    for tri, area in zip(triangles, areas):
-        cum += area
-        if r <= cum:
-            chosen = tri
-            break
-    u = random.random()
-    v = random.random()
-    if u + v > 1:
-        u, v = 1 - u, 1 - v
-    A, B, C = chosen
-    x = A[0] + u * (B[0] - A[0]) + v * (C[0] - A[0])
-    y = A[1] + u * (B[1] - A[1]) + v * (C[1] - A[1])
-    return (x, y)
+    if idx == 0:
+        img_unfolded = Image.new("RGB", (120, 120), "white")
+        draw_unfolded = ImageDraw.Draw(img_unfolded)
+        draw_paper(draw_unfolded)
+        process_images.append((img_unfolded, "Unfolded"))
+    if idx >= len(current_folds):
+        return poly
+    fold = current_folds[idx]
+    new_poly = clip_polygon(poly, fold)
+    img_result = Image.new("RGB", (120, 120), "white")
+    draw_result = ImageDraw.Draw(img_result)
+    draw_result.polygon(poly, fill="lightgray", outline="black")
+    if new_poly:
+        draw_result.polygon(new_poly, fill="white", outline="black")
+    process_images.append((img_result, f"Fold {idx + 1}"))
+    return recursive_fold(current_folds, idx + 1, new_poly)
 
 
-def rotate_point(p, angle_deg, center=(0.5, 0.5)):
+def generate_wrong_option_remove_one(holes):
+    import copy
+
+    candidate = copy.copy(holes)
+    if len(candidate) > 1:
+        idx = random.randrange(len(candidate))
+        candidate.pop(idx)
+    elif len(candidate) == 1:
+        x, y = candidate[0]
+        dx = random.randint(-3, 3)
+        dy = random.randint(-3, 3)
+        candidate[0] = (x + dx, y + dy)
+    return candidate
+
+
+def generate_wrong_option_mirror(holes):
+    candidate = []
+    for x, y in holes:
+        new_x = 120 - x
+        new_y = 120 - y
+        candidate.append((new_x, new_y))
+    return candidate
+
+
+def generate_wrong_option_rotate(holes):
+    candidate = []
+    for x, y in holes:
+        tx, ty = x - 60, y - 60
+        rx, ry = ty, -tx
+        candidate.append((rx + 60, ry + 60))
+    return candidate
+
+
+def generate_test_image(folds, test_number, num_folds, num_holes):
     """
-    Rotate point p by angle_deg degrees around the given center.
+    Generate a test image with:
+      - Top row: final views after each fold.
+      - Bottom row: three candidate options.
+    Holes are generated inside the final folded view (with a margin) and then unfolded
+    using the layered reflection (doubling layers per fold).
     """
-    angle_rad = math.radians(angle_deg)
-    x, y = p
-    cx, cy = center
-    x -= cx
-    y -= cy
-    x_new = x * math.cos(angle_rad) - y * math.sin(angle_rad)
-    y_new = x * math.sin(angle_rad) + y * math.cos(angle_rad)
-    return (x_new + cx, y_new + cy)
+    small_size = 120
+    global process_images
+    process_images = []  # Reset for each test image
 
+    try:
+        # Use a font known to be available on most systems.
+        font_bigger = ImageFont.truetype("Arial", size=18)
+    except OSError:
+        font_bigger = ImageFont.load_default()
 
-def clamp_point(p, min_val=0.0, max_val=1.0):
-    """
-    Clamp point p so that both coordinates are between min_val and max_val.
-    """
-    x, y = p
-    return (max(min_val, min(x, max_val)), max(min_val, min(y, max_val)))
+    initial_poly = [(10, 10), (110, 10), (110, 110), (10, 110)]
+    final_poly = recursive_fold(folds, 0, initial_poly)
 
+    # Generate punched holes within the final polygon.
+    punched_holes = [
+        generate_hole_in_poly(final_poly, margin=5) for _ in range(num_holes)
+    ]
+    # Compute unfolded holes (all layers) for the candidate.
+    unfolded_holes = compute_all_layers(punched_holes, folds)
 
-# --- Functions for generating folds on a polygon with reasonable area ---
+    img_final = Image.new("RGB", (small_size, small_size), "white")
+    draw_final = ImageDraw.Draw(img_final)
+    if final_poly:
+        draw_final.polygon(final_poly, fill="white", outline="black")
+    draw_holes(draw_final, punched_holes)
+    process_images.append((img_final, "Final view"))
 
+    # Correct (unfolded) option.
+    img_correct = Image.new("RGB", (small_size, small_size), "white")
+    draw_correct = ImageDraw.Draw(img_correct)
+    draw_paper(draw_correct)
+    draw_holes(draw_correct, unfolded_holes)
 
-def generate_folds_poly(num_folds, area_threshold=0.3, max_attempts=10):
-    """
-    Starting with the unit square as a polygon, apply num_folds sequentially.
-    Each fold is randomly chosen among 'vertical', 'horizontal', and 'diagonal'.
-    For vertical/horizontal folds, we use the midpoint of the current bounding box.
-    For diagonal folds, we randomly choose one of the two diagonals.
-    To ensure a "reasonable" fold, we require that the area of the resulting polygon
-    is at least area_threshold (e.g. 30%) of the original polygon's area.
-    If a fold attempt reduces the area too much, try another fold type (up to max_attempts).
-    Returns a list of fold dictionaries (with fold parameters) and a list of intermediate polygon states.
-    """
-    poly = [(0, 0), (1, 0), (1, 1), (0, 1)]
-    states = [poly]
-    folds = []
-    for i in range(num_folds):
-        old_area = polygon_area(poly)
-        best_poly = None
-        best_area = -1
-        best_fold = None
-        for attempt in range(max_attempts):
-            fold_type = random.choice(["vertical", "horizontal", "diagonal"])
-            bbox = polygon_bounding_box(poly)
-            min_x, min_y, max_x, max_y = bbox
-            if fold_type == "vertical":
-                crease = (min_x + max_x) / 2.0
-                f_func = lambda p: p[0] - crease
-                new_poly = clip_polygon(poly, f_func)
-                fold_info = {"type": "vertical", "crease": crease}
-            elif fold_type == "horizontal":
-                crease = (min_y + max_y) / 2.0
-                f_func = lambda p: p[1] - crease
-                new_poly = clip_polygon(poly, f_func)
-                fold_info = {"type": "horizontal", "crease": crease}
-            else:
-                direction = random.choice(["d1", "d2"])
-                if direction == "d1":
-                    A = (min_x, min_y)
-                    B = (max_x, max_y)
+    wrong_b = generate_wrong_option_remove_one(unfolded_holes)
+    img_wrong_b = Image.new("RGB", (small_size, small_size), "white")
+    draw_wrong_b = ImageDraw.Draw(img_wrong_b)
+    draw_paper(draw_wrong_b)
+    draw_holes(draw_wrong_b, wrong_b)
 
-                    def f_func(p, A=A, B=B):
-                        return (B[0] - A[0]) * (p[1] - A[1]) - (B[1] - A[1]) * (
-                            p[0] - A[0]
-                        )
+    wrong_c = generate_wrong_option_mirror(unfolded_holes)
+    if set(wrong_c) == set(unfolded_holes):
+        wrong_c = generate_wrong_option_rotate(unfolded_holes)
+        if set(wrong_c) == set(unfolded_holes):
+            wrong_c = [(min(x + 5, 110), y) for (x, y) in unfolded_holes]
+    img_wrong_c = Image.new("RGB", (small_size, small_size), "white")
+    draw_wrong_c = ImageDraw.Draw(img_wrong_c)
+    draw_paper(draw_wrong_c)
+    draw_holes(draw_wrong_c, wrong_c)
 
-                    new_poly = clip_polygon(poly, f_func)
-                    fold_info = {"type": "diagonal", "direction": "d1", "A": A, "B": B}
-                else:
-                    A = (min_x, max_y)
-                    B = (max_x, min_y)
+    candidates = [
+        ("correct", img_correct),
+        ("wrong", img_wrong_b),
+        ("wrong", img_wrong_c),
+    ]
+    random.shuffle(candidates)
+    option_labels = ["A", "B", "C"]
+    options = []
+    correct_label = None
+    for label, (kind, img) in zip(option_labels, candidates):
+        options.append((img, label))
+        if kind == "correct":
+            correct_label = label
 
-                    def f_func(p, A=A, B=B):
-                        return (B[0] - A[0]) * (p[1] - A[1]) - (B[1] - A[1]) * (
-                            p[0] - A[0]
-                        )
+    top_width = len(process_images) * small_size + (len(process_images) - 1) * 10
+    bottom_width = 3 * small_size + 2 * 10
+    total_width = max(top_width, bottom_width)
+    total_height = 320  # Set overall canvas height to 320
+    total_img = Image.new("RGB", (total_width, total_height), "white")
+    draw_total = ImageDraw.Draw(total_img)
 
-                    new_poly = clip_polygon(poly, f_func)
-                    fold_info = {"type": "diagonal", "direction": "d2", "A": A, "B": B}
-            new_area = polygon_area(new_poly)
-            if new_area >= area_threshold * old_area:
-                best_poly = new_poly
-                best_area = new_area
-                best_fold = fold_info
-                break
-            elif new_area > best_area:
-                best_poly = new_poly
-                best_area = new_area
-                best_fold = fold_info
-        poly = best_poly
-        folds.append(best_fold)
-        states.append(poly)
-    return folds, states
-
-
-# --- Unfolding function (supports vertical, horizontal, and diagonal) ---
-
-
-def unfold_point_general(p, folds, decisions):
-    """
-    Given a point p in the final folded region and a decision vector (one boolean per fold),
-    compute the unfolded coordinate by processing folds in reverse order.
-    For each fold with decision True, reflect p across that fold’s crease.
-    Supports 'vertical', 'horizontal', and 'diagonal' folds.
-    """
-    x, y = p
-    for fold, decision in reversed(list(zip(folds, decisions))):
-        if not decision:
-            continue
-        if fold["type"] == "vertical":
-            crease = fold["crease"]
-            x = crease + (crease - x)
-        elif fold["type"] == "horizontal":
-            crease = fold["crease"]
-            y = crease + (crease - y)
-        elif fold["type"] == "diagonal":
-            A = fold["A"]
-            B = fold["B"]
-            d = (B[0] - A[0], B[1] - A[1])
-            u = (x - A[0], y - A[1])
-            dot = u[0] * d[0] + u[1] * d[1]
-            d_dot = d[0] * d[0] + d[1] * d[1]
-            if d_dot == 0:
-                continue
-            proj = (dot / d_dot * d[0], dot / d_dot * d[1])
-            x = A[0] + 2 * proj[0] - u[0]
-            y = A[1] + 2 * proj[1] - u[1]
-    return (x, y)
-
-
-# --- Main function for generating images and metadata ---
-
-
-def main(num_folds, num_puncture, num_img):
-    output_dir = "generated_images"
-    os.makedirs(output_dir, exist_ok=True)
-    metadata_filename = os.path.join(output_dir, "metadata.jsonl")
-    metafile = open(metadata_filename, "w")
-
-    for img_index in range(num_img):
-        # Generate fold sequence and intermediate polygon states.
-        folds, states = generate_folds_poly(num_folds)
-        final_poly = states[-1]
-
-        # Generate random punctures uniformly in the final folded region.
-        punctures_folded = [
-            sample_point_in_polygon(final_poly) for _ in range(num_puncture)
-        ]
-
-        # Compute all possible unfolded positions.
-        if num_folds > 0:
-            all_decisions = list(itertools.product([True, False], repeat=num_folds))
-        else:
-            all_decisions = [()]
-        unfolded_all = set()
-        for p in punctures_folded:
-            for decisions in all_decisions:
-                up = unfold_point_general(p, folds, decisions)
-                unfolded_all.add(up)
-        unfolded_all = list(unfolded_all)
-
-        # Build candidate sets.
-        candidate_correct = unfolded_all
-        candidate_offset1 = [
-            clamp_point((x + 0.02, y + 0.02)) for (x, y) in unfolded_all
-        ]
-        candidate_offset2 = [
-            clamp_point((x - 0.02, y - 0.02)) for (x, y) in unfolded_all
-        ]
-        candidate_rotated = [
-            clamp_point(rotate_point(p, 5, center=(0.5, 0.5))) for p in unfolded_all
-        ]
-
-        candidates = [
-            (candidate_correct, "correct"),
-            (candidate_offset1, "offset1"),
-            (candidate_offset2, "offset2"),
-            (candidate_rotated, "rotated"),
-        ]
-        random.shuffle(candidates)
-        for idx, (cand, label) in enumerate(candidates):
-            if label == "correct":
-                correct_candidate_index = idx + 1  # 1-indexed
-                break
-
-        # --- Create the figure ---
-        # Layout:
-        # TOP ROW: Horizontal row of folding process (each intermediate state side-by-side),
-        #          with the final state showing the puncture(s).
-        # BOTTOM ROW: Four candidate unfolded views with overlaid text labels.
-        fig = plt.figure(figsize=(18, 10))
-        outer = gridspec.GridSpec(2, 1, height_ratios=[1, 1])
-
-        # TOP ROW: Arrange intermediate states horizontally.
-        num_states = len(states)
-        process_gs = gridspec.GridSpecFromSubplotSpec(
-            1, num_states, subplot_spec=outer[0]
+    start_x = (total_width - top_width) // 2
+    current_x = start_x
+    # Draw top row images and text; text drawn at y=10.
+    for img, label in process_images:
+        total_img.paste(img, (current_x, 30))
+        draw_total.text(
+            (current_x + 15, 10), label, fill="black", font=font_bigger, align="center"
         )
-        for i, state in enumerate(states):
-            ax = plt.Subplot(fig, process_gs[i])
-            ax.add_patch(
-                patches.Polygon(
-                    state, closed=True, fill=False, edgecolor="black", linewidth=2
-                )
-            )
-            # For i > 0, draw the crease line from the fold that produced this state in red.
-            if i > 0:
-                fold = folds[i - 1]
-                if fold["type"] == "vertical":
-                    bbox = polygon_bounding_box(state)
-                    min_y, max_y = bbox[1], bbox[3]
-                    crease = fold["crease"]
-                    ax.plot(
-                        [crease, crease], [min_y, max_y], linestyle="--", color="red"
-                    )
-                elif fold["type"] == "horizontal":
-                    bbox = polygon_bounding_box(state)
-                    min_x, max_x = bbox[0], bbox[2]
-                    crease = fold["crease"]
-                    ax.plot(
-                        [min_x, max_x], [crease, crease], linestyle="--", color="red"
-                    )
-                elif fold["type"] == "diagonal":
-                    A = fold["A"]
-                    B = fold["B"]
-                    ax.plot([A[0], B[0]], [A[1], B[1]], linestyle="--", color="red")
-            # If this is the final state, plot the punctures.
-            if i == num_states - 1:
-                for p in punctures_folded:
-                    ax.plot(p[0], p[1], "ko", markersize=6)
-            ax.set_title(f"Fold {i}", fontsize=18, color="black")
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-            ax.set_aspect("equal")
-            ax.axis("off")
-            fig.add_subplot(ax)
+        current_x += small_size + 10
 
-        # BOTTOM ROW: Candidate unfolded views with text labels.
-        bottom_gs = gridspec.GridSpecFromSubplotSpec(1, 4, subplot_spec=outer[1])
-        for i, (cand, _) in enumerate(candidates):
-            ax = plt.Subplot(fig, bottom_gs[i])
-            ax.add_patch(patches.Rectangle((0, 0), 1, 1, fill=False, edgecolor="black"))
-            for up in cand:
-                ax.plot(up[0], up[1], "ko", markersize=6)
-            # Overlay candidate label text on the image.
-            ax.text(
-                0.5,
-                0.95,
-                f"Candidate {i + 1}",
-                transform=ax.transAxes,
-                ha="center",
-                va="top",
-                fontsize=18,
-                color="black",
-            )
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-            ax.set_aspect("equal")
-            ax.axis("off")
-            fig.add_subplot(ax)
+    start_x_bottom = (total_width - bottom_width) // 2
+    current_x = start_x_bottom
+    # Draw bottom row images and text; images now pasted at y=170 and text at y=190.
+    for img, label in options:
+        total_img.paste(img, (current_x, 190))
+        draw_total.text(
+            (current_x + 45, 180), label, fill="black", font=font_bigger, align="center"
+        )
+        current_x += small_size + 10
 
-        plt.tight_layout()
-        filename = os.path.join(output_dir, f"paper_folding_image_{img_index + 1}.png")
-        plt.savefig(filename)
-        plt.close(fig)
-        print(f"Saved image: {filename}")
-
-        # Write metadata.
-        metadata = {
-            "filename": filename,
-            "candidate_order": [label for (_, label) in candidates],
-            "correct_candidate": correct_candidate_index,  # 1-indexed
-        }
-        metafile.write(json.dumps(metadata) + "\n")
-
-    metafile.close()
-    print(f"Metadata saved to {metadata_filename}")
+    f_name = f"{test_number}_fold-{num_folds}_holes-{num_holes}.png"
+    out_path = os.path.join(OUTPUT_DIR, f_name)
+    total_img.save(out_path)
+    return out_path, correct_label
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate paper folding simulation images with vertical, horizontal, and diagonal folds. "
-        "The folding process is showcased horizontally and punctures appear in the final state. "
-        "Four candidate unfolded views (with labels) are produced; candidate points are clamped to the paper boundaries. "
-        "Dashed folding lines are drawn in red, all text is fontsize 18 in black, and all axes are set to 0–1."
+        description="Generate folded paper images with holes."
     )
     parser.add_argument(
-        "--num_folds", type=int, default=2, help="Number of folds to apply."
+        "-n",
+        "--num-images",
+        type=int,
+        default=10,
+        help="Number of images to generate (default: 10)",
     )
     parser.add_argument(
-        "--num_puncture", type=int, default=1, help="Number of punctures to draw."
+        "-s",
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed for random number generator (default: 42)",
     )
     parser.add_argument(
-        "--num_img", type=int, default=1, help="Number of images to generate."
+        "-f",
+        "--num-folds",
+        type=int,
+        default=2,
+        choices=range(1, 10),
+        help="Number of folds (minimum 1, maximum 9) (default: 2)",
+    )
+    parser.add_argument(
+        "-H", "--num-holes", type=int, default=1, help="Number of holes (default: 1)"
+    )
+    parser.add_argument(
+        "-m",
+        "--metadata-file",
+        type=str,
+        default="metadata.jsonl",
+        help="Metadata JSONL file to append to (default: metadata.jsonl)",
     )
     args = parser.parse_args()
 
-    main(args.num_folds, args.num_puncture, args.num_img)
+    random.seed(args.seed)
+    metadata_path = os.path.join(OUTPUT_DIR, args.metadata_file)
+    with open(metadata_path, "a", encoding="utf-8") as metaf:
+        for i in range(1, args.num_images + 1):
+            fold_group = random.choice(["VH", "Diagonal"])
+            if fold_group == "VH":
+                folds = [random.choice(["V", "H"]) for _ in range(args.num_folds)]
+            else:
+                folds = [random.choice(["D", "N"]) for _ in range(args.num_folds)]
+            image_path, correct_option = generate_test_image(
+                folds, i, args.num_folds, args.num_holes
+            )
+            rel_image_path = os.path.basename(image_path)
+            metadata_obj = {
+                "filename": rel_image_path,
+                "correct_option": correct_option,
+            }
+            metaf.write(json.dumps(metadata_obj) + "\n")
