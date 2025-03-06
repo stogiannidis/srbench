@@ -1,1 +1,1 @@
-from .vlm_helpers import VLMWrapper, extract_answer
+from .vlm_helpers import VLMWrapper
