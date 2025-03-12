@@ -17,16 +17,28 @@ This repository is divided into several modules that cover various aspects of th
 
 The project is organized as follows:
 ```
-/Root
- ├── bin/               # Storage for model binaries.
- ├── scripts/           # Bash scripts for running the project.
- ├── src/               # Source code of the project.
- │   ├── create_prompts.py  # Script to generate prompts.
- │   ├── create_images.py   # Script to create images.
- │	 └── test_vlms.py       # Test script for the VLMS model.
- ├── tests/             # Tests for the project.
- │   ├── test_pipelines.py  # Tests for pipeline.
- └── README.md          # This readme file.
+SRBench/
+├── bin/                                  # Storage for model binaries
+├── scripts/                              # Bash scripts for running the project
+│   └── run.sh                            # Main execution script
+├── src/                                  # Source code of the project
+│   ├── data_creation/                    # Scripts for data creation
+│       ├── __init__.py                	  # Initialization file
+│       ├── create_data.py                # Script for data creation
+│       ├── create_images.py              # Script to create images
+│       └── create_prompts.py             # Script to generate prompts
+│   ├── utils/                            # Utility functions
+│       ├── __init__.py                   # Initialization file
+│       ├── vlm_helpers.py                # Helper functions for the VLM models
+│   ├── eval.py                           # Evaluation script
+│   ├── eval_intern.py 				      # Evaluation script for InternVL
+│   ├── eval_openai.py 				      # Evaluation script for OpenAI models
+│   ├── eval_mini.py 				      # Evaluation script for MiniCPM-V
+├── create_data.py                        # Script for data creation
+├── .gitignore                            # Files and directories to ignore
+├── requirements.txt                      # Required packages
+├── LICENSE                               # MIT License file
+└── README.md                             # Project documentation
 ```
 
 ## Installation
