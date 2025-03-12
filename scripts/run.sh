@@ -1,4 +1,3 @@
-HF_HOME="/home/s2750560/RDS/huggingface/cache"
 DATASET="stogian/srbench2"
 
 
