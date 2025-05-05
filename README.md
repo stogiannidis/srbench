@@ -3,6 +3,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-stogian%2Fsrbench-blue.svg)](https://huggingface.co/datasets/stogian/srbench)
+[![ArXiv](https://img.shields.io/badge/ArXiv-2503.19707-brown.svg)](https://arxiv.org/abs/2503.19707)
 
 Welcome to our project! This repository contains all the source code, tests, and documentation required to understand and run the project. Below is an overview of the repository structure, installation, usage instructions, and contribution guidelines.
 
