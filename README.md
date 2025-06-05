@@ -78,6 +78,19 @@ To run the project, follow these steps:
 
 > **Note**: This is a TODO – dataset is not available yet.
 
+## Citation
+```
+@article{stogiannidis2025mgbpatial,
+      title={Mind the Gap: Benchmarking Spatial Reasoning in Vision-Language Models}, 
+      author={Ilias Stogiannidis and Steven McDonagh and Sotirios A. Tsaftaris},
+      year={2025},
+      eprint={2503.19707},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2503.19707}, 
+}
+```
+
 ## Contributing
 
 Contributions are welcome! Please follow these steps:
