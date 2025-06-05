@@ -74,9 +74,6 @@ To run the project, follow these steps:
 2. Run the script:
 	```bash
 	bash scripts/run.sh
-	```
-
-> **Note**: This is a TODO – dataset is not available yet.
 
 ## Citation
 ```
