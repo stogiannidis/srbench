@@ -8,6 +8,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.gridspec import GridSpec
 
+# Global line width constant for easy modification
+LINE_WIDTH = 3.0
+
+# Global font size constant for easy modification
+FONT_SIZE = 18
+
 # Global dictionary of polycube shapes
 SHAPES = {
     "Snake": [
@@ -116,10 +122,11 @@ def plot_cubes(ax, vertices, title="", facecolor="white", hide_3d_elements=False
             polygon = Poly3DCollection(
                 [cube_verts[face]], facecolors=facecolor,
                 edgecolors="black", alpha=1.0,
+                linewidths=LINE_WIDTH,
             )
             ax.add_collection3d(polygon)
     
-    ax.set_title(title, fontsize=12)
+    ax.set_title(title, fontsize=FONT_SIZE)
     set_axes_equal(ax, vertices)
 
 
@@ -308,7 +315,7 @@ def generate_one_image(index, difficulty="easy", facecolor="white", outdir="data
     # Save image
     filename = f"{shape_name}_{index}.png"
     output_path = os.path.join(outdir, filename)
-    plt.savefig(output_path, dpi=60, bbox_inches="tight", pad_inches=0)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     
     # Save metadata
@@ -328,8 +335,8 @@ def main():
         description="Generate mental rotation test images with variable difficulty."
     )
     parser.add_argument(
-        "--difficulty", "-d", type=str, choices=["easy", "complex"], default="easy",
-        help="Difficulty level: 'easy' (3 candidates, simple rotations) or 'complex' (4 candidates, complex transformations)"
+        "--difficulty", "-d", type=str, choices=["easy", "hard"], default="easy",
+        help="Difficulty level: 'easy' (3 candidates, simple rotations) or 'hard' (4 candidates, complex transformations)"
     )
     parser.add_argument(
         "--num_images", "-n", type=int, default=1,

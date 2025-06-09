@@ -6,6 +6,12 @@ import json
 import math
 from collections import defaultdict
 
+# Global line width constant for easy modification
+LINE_WIDTH = 2
+
+# Global font size constant for easy modification
+FONT_SIZE = 20
+
 OUTPUT_DIR = "data/pf"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -13,8 +19,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 _font_cache = {}
 
 
-def get_font(size=18):
+def get_font(size=None):
     """Get cached font instance."""
+    if size is None:
+        size = FONT_SIZE
     if size not in _font_cache:
         try:
             _font_cache[size] = ImageFont.truetype("Arial", size=size)
@@ -25,7 +33,7 @@ def get_font(size=18):
 
 def draw_paper(draw):
     """Draw a 100x100 white square paper with a black outline."""
-    draw.rectangle((10, 10, 110, 110), outline="black", fill="white")
+    draw.rectangle((10, 10, 110, 110), outline="black", fill="white", width=LINE_WIDTH)
 
 
 def draw_holes(draw, holes):
@@ -221,9 +229,9 @@ def recursive_fold(current_folds, idx, poly):
     draw_result = ImageDraw.Draw(img_result)
 
     if poly:
-        draw_result.polygon(poly, fill="lightgray", outline="black")
+        draw_result.polygon(poly, fill="lightgray", outline="black", width=LINE_WIDTH)
     if new_poly:
-        draw_result.polygon(new_poly, fill="white", outline="black")
+        draw_result.polygon(new_poly, fill="white", outline="black", width=LINE_WIDTH)
 
     process_images.append((img_result, f"Fold {idx + 1}"))
     return recursive_fold(current_folds, idx + 1, new_poly)
@@ -263,7 +271,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
     global process_images
     process_images = []
 
-    font_bigger = get_font(18)
+    font_bigger = get_font()
 
     initial_poly = [(10, 10), (110, 10), (110, 110), (10, 110)]
     final_poly = recursive_fold(folds, 0, initial_poly)
@@ -278,7 +286,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
     img_final = Image.new("RGB", (120, 120), "white")
     draw_final = ImageDraw.Draw(img_final)
     if final_poly:
-        draw_final.polygon(final_poly, fill="white", outline="black")
+        draw_final.polygon(final_poly, fill="white", outline="black", width=LINE_WIDTH)
     draw_holes(draw_final, punched_holes)
     process_images.append((img_final, "Final view"))
 
@@ -334,7 +342,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
     # Save image
     f_name = f"{test_number}_fold-{num_folds}_holes-{num_holes}.png"
     out_path = os.path.join(OUTPUT_DIR, f_name)
-    total_img.save(out_path)
+    total_img.save(out_path, dpi=(300, 300), optimize=True)
 
     return out_path, correct_label
 
