@@ -10,7 +10,7 @@ from collections import defaultdict
 LINE_WIDTH = 2
 
 # Global font size constant for easy modification
-FONT_SIZE = 20
+FONT_SIZE = 18
 
 OUTPUT_DIR = "data/pf"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -27,7 +27,7 @@ def get_font(size=None):
         try:
             _font_cache[size] = ImageFont.truetype("Arial", size=size)
         except OSError:
-            _font_cache[size] = ImageFont.load_default()
+            _font_cache[size] = ImageFont.load_default(size)
     return _font_cache[size]
 
 
@@ -271,7 +271,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
     global process_images
     process_images = []
 
-    font_bigger = get_font()
+    font_bigger = get_font()  # Use even larger font for labels
 
     initial_poly = [(10, 10), (110, 10), (110, 110), (10, 110)]
     final_poly = recursive_fold(folds, 0, initial_poly)
@@ -308,7 +308,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
 
     # Shuffle and assign labels
     random.shuffle(candidate_images)
-    option_labels = ["A", "B", "C"]
+    option_labels = ["Option A", "Option B", "Option C"]
     correct_label = None
 
     for i, (kind, img) in enumerate(candidate_images):
@@ -337,7 +337,7 @@ def generate_test_image(folds, test_number, num_folds, num_holes):
     for i, (_, img) in enumerate(candidate_images):
         x = start_x_bottom + i * (small_size + 10)
         total_img.paste(img, (x, 190))
-        draw_total.text((x + 45, 180), option_labels[i], fill="black", font=font_bigger)
+        draw_total.text((x + 20, 180), option_labels[i], fill="black", font=font_bigger)
 
     # Save image
     f_name = f"{test_number}_fold-{num_folds}_holes-{num_holes}.png"
