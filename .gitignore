@@ -14,6 +14,7 @@ dist/
 *.egg-info/
 
 # Jupyter notebooks
+*.ipynb
 .ipynb_checkpoints/
 
 # Machine learning artifacts
@@ -43,3 +44,4 @@ output/
 *.yml
 *.jsonl
 *.html
+scripts/.nfs00000000301908e700000011
