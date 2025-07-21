@@ -43,3 +43,7 @@ output/
 *.yml
 *.jsonl
 *.html
+
+# Legacy files
+example/
+legacy/
