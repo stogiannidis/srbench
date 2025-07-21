@@ -21,7 +21,6 @@ dist/
 *.ckpt
 logs/
 models/
-data/
 
 # Logging files
 *.log
