@@ -24,7 +24,9 @@ from transformers import (
     MllamaForConditionalGeneration,
     AutoModel,
     AutoTokenizer,
+    Gemma3ForConditionalGeneration,
 )
+from deepseek_vl.models import DeepseekVLV2Processor
 from qwen_vl_utils import process_vision_info
 
 # Configure logging
@@ -121,6 +123,12 @@ MODEL_CONFIGS = {
         requires_trust_remote_code=True,
         supports_flash_attention=True,
         inference_type="internvl"
+    ),
+    "gemma3": ModelConfig(  # <-- ADD THIS ENTIRE BLOCK
+        model_class=Gemma3ForConditionalGeneration,
+        processor_class=AutoProcessor,
+        supports_flash_attention=True,
+        padding_side="left"
     ),
 }
 
@@ -229,6 +237,7 @@ class VLMWrapper:
             "phi35": r"microsoft/Phi-3\.5-vision-instruct",
             "minicpm": r"openbmb/MiniCPM",
             "internvl": r"OpenGVLab/InternVL",
+            "gemma3": r"google/gemma-3",
         }
         
         for model_type, pattern in model_patterns.items():
@@ -327,6 +336,8 @@ class VLMWrapper:
         try:
             if self.model_type == "qwen":
                 return self._preprocess_qwen(batch_conversations)
+            elif self.model_type == "gemma3":
+                return self._preprocess_gemma3(batch_conversations, batch_images)
             elif self.model_type == "mllama":
                 return self._preprocess_mllama(batch_conversations, batch_images)
             elif self.model_type in ["llava", "llava_next"]:
@@ -344,6 +355,55 @@ class VLMWrapper:
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.model_type}: {e}")
             raise
+        
+    def _preprocess_gemma3(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
+        """Preprocess for Gemma 3 models."""
+        processed_inputs = []
+        for i, conv in enumerate(batch_conversations):
+            # Extract image and text from the conversation
+            image_content = next((item['image'] for item in conv[0]['content'] if 'image' in item), None)
+            text_content = " ".join([item['text'] for item in conv[0]['content'] if 'text' in item])
+
+            # Use the provided image or fall back to the one in the conversation
+            image = batch_images[i] if batch_images and i < len(batch_images) else image_content
+
+            if image is None:
+                raise ValueError(f"No image provided for Gemma 3 conversation {i}")
+
+            # Construct the messages in the format Gemma 3 expects
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant."}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": text_content}
+                    ]
+                }
+            ]
+
+            # Apply the chat template
+            inputs = self.processor.apply_chat_template(
+                messages, 
+                add_generation_prompt=True, 
+                tokenize=True,
+                return_dict=True, 
+                return_tensors="pt"
+            )
+            processed_inputs.append(inputs)
+
+        # Batch the processed inputs
+        if len(processed_inputs) == 1:
+            return {k: v.to(self.device) for k, v in processed_inputs[0].items()}
+        else:
+            batched_inputs = {}
+            # This simple batching might fail if sequences have different lengths.
+            # A more robust implementation would pad to the max length in the batch.
+            for key in processed_inputs[0].keys():
+                batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs], dim=0)
+            
+            return {k: v.to(self.device) for k, v in batched_inputs.items()}
+
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
@@ -744,6 +804,13 @@ class VLMWrapper:
         try:
             if self.model_type == "qwen":
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            elif self.model_type == "gemma3":
+                # Slice off the input tokens if input_len is provided
+                input_len = extra if extra is not None else 0
+                # Handle both batch and single generation
+                if generated_ids.dim() == 1:
+                    generated_ids = generated_ids.unsqueeze(0)
+                return [self.processor.decode(g[input_len:], skip_special_tokens=True) for g in generated_ids]
             elif self.model_type == "mllama":
                 return [self.processor.decode(g, skip_special_tokens=True) for g in generated_ids]
             elif self.model_type == "llava":
