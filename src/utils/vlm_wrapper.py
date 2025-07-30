@@ -12,6 +12,7 @@ from PIL import Image
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from transformers import (
+    Qwen2VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
     AutoProcessor,
     LlavaForConditionalGeneration,
@@ -26,7 +27,6 @@ from transformers import (
     AutoTokenizer,
     Gemma3ForConditionalGeneration,
 )
-from deepseek_vl.models import DeepseekVLV2Processor
 from qwen_vl_utils import process_vision_info
 
 # Configure logging
@@ -62,6 +62,18 @@ MODEL_CONFIGS = {
         processor_class=AutoProcessor,
         supports_flash_attention=True,
         processor_args={"use_fast": True}
+    ),
+    "qwen_qvq": ModelConfig(
+        model_class=Qwen2VLForConditionalGeneration,
+        processor_class=AutoProcessor,
+        supports_flash_attention=True,
+        processor_args={"use_fast": True}
+    ),
+    "kimi": ModelConfig(
+        model_class=AutoModelForCausalLM,
+        processor_class=AutoProcessor,
+        requires_trust_remote_code=True,
+        supports_flash_attention=True
     ),
     "llava": ModelConfig(
         model_class=LlavaForConditionalGeneration,
@@ -104,12 +116,6 @@ MODEL_CONFIGS = {
         processor_class=AutoProcessor,
         processor_args={"use_fast": True, "padding_side": "left"}
     ),
-    "phi35": ModelConfig(
-        model_class=AutoModelForCausalLM,
-        processor_class=AutoProcessor,
-        requires_trust_remote_code=True,
-        special_args={"num_crops": 16}
-    ),
     "minicpm": ModelConfig(
         model_class=AutoModel,
         processor_class=AutoTokenizer,
@@ -124,7 +130,7 @@ MODEL_CONFIGS = {
         supports_flash_attention=True,
         inference_type="internvl"
     ),
-    "gemma3": ModelConfig(  # <-- ADD THIS ENTIRE BLOCK
+    "gemma3": ModelConfig(
         model_class=Gemma3ForConditionalGeneration,
         processor_class=AutoProcessor,
         supports_flash_attention=True,
@@ -227,6 +233,7 @@ class VLMWrapper:
         """Detect model type from model_id."""
         model_patterns = {
             "qwen": r"Qwen/",
+            "qwen_qvq": r"Qwen/QVQ",
             "llava": r"llava-hf/llava-1\.5",
             "llava_next": r"llava-hf/llava-v1\.6",
             "instructblip": r"Salesforce/instructblip",
@@ -234,10 +241,10 @@ class VLMWrapper:
             "idefics": r"HuggingFaceM4/Idefics",
             "smolvlm": r"HuggingFaceTB/SmolVLM",
             "mllama": r"meta-llama",
-            "phi35": r"microsoft/Phi-3\.5-vision-instruct",
             "minicpm": r"openbmb/MiniCPM",
             "internvl": r"OpenGVLab/InternVL",
             "gemma3": r"google/gemma-3",
+            "kimi": r"moonshotai/Kimi-VL",
         }
         
         for model_type, pattern in model_patterns.items():
@@ -336,14 +343,16 @@ class VLMWrapper:
         try:
             if self.model_type == "qwen":
                 return self._preprocess_qwen(batch_conversations)
+            elif self.model_type == "qwen_qvq":
+                return self._preprocess_qwen_qvq(batch_conversations) 
             elif self.model_type == "gemma3":
                 return self._preprocess_gemma3(batch_conversations, batch_images)
+            elif self.model_type == "kimi":
+                return self._preprocess_kimi(batch_conversations, batch_images)
             elif self.model_type == "mllama":
                 return self._preprocess_mllama(batch_conversations, batch_images)
             elif self.model_type in ["llava", "llava_next"]:
                 return self._preprocess_llava(batch_conversations, batch_images)
-            elif self.model_type == "phi35":
-                return self._preprocess_phi35(batch_conversations, batch_images)
             elif self.model_type == "instructblip":
                 return self._preprocess_instructblip(batch_conversations, batch_images)
             elif self.model_type == "molmo":
@@ -355,6 +364,56 @@ class VLMWrapper:
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.model_type}: {e}")
             raise
+    
+    def _preprocess_kimi(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
+        """Preprocess for Kimi models."""
+        
+        # Kimi's processor can handle multiple images per conversation
+        # This implementation assumes that if multiple images are provided,
+        # they all belong to the single conversation in the batch.
+        if len(batch_conversations) > 1 and len(batch_images) > 1:
+            logger.warning("Kimi wrapper handles multiple images for a single conversation, not for a batch of conversations. Processing one image per conversation.")
+            images_to_process = [[img] for img in batch_images]
+        else:
+            images_to_process = [batch_images] * len(batch_conversations)
+
+        processed_inputs_batch = []
+        for i, conv in enumerate(batch_conversations):
+            current_images = images_to_process[i]
+            
+            # 1. Construct the 'messages' list for the chat template
+            messages = []
+            for turn in conv:
+                content_list = []
+                # Kimi expects image content first
+                if current_images:
+                    content_list.extend([{"type": "image"}] * len(current_images))
+                
+                text_content = " ".join([item['text'] for item in turn['content'] if 'text' in item])
+                content_list.append({"type": "text", "text": text_content})
+                
+                messages.append({"role": turn['role'], "content": content_list})
+
+            # 2. First processing step: apply chat template
+            # Note: The Kimi processor expects the tokenized output as input for the next step
+            text_inputs = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt"
+            )
+
+            # 3. Second processing step: combine images and tokenized text
+            final_inputs = self.processor(
+                images=current_images, text=text_inputs, return_tensors="pt", padding=True, truncation=True
+            )
+            processed_inputs_batch.append(final_inputs)
+
+        # 4. Batch the results from each conversation
+        if len(processed_inputs_batch) == 1:
+            return {k: v.to(self.device) for k, v in processed_inputs_batch[0].items()}
+        else:
+            batched_inputs = {}
+            for key in processed_inputs_batch[0].keys():
+                batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs_batch], dim=0)
+            return {k: v.to(self.device) for k, v in batched_inputs.items()}
         
     def _preprocess_gemma3(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Gemma 3 models."""
@@ -625,6 +684,23 @@ class VLMWrapper:
         image_inputs, _ = process_vision_info(batch_conversations)
         inputs = self.processor(text=prompts, images=image_inputs, padding=True, return_tensors="pt")
         return {k: v.to(self.device) for k, v in inputs.items()}
+    
+    def _preprocess_qwen_qvq(self, batch_conversations: List[List]) -> Dict[str, torch.Tensor]:
+        """Preprocess for Qwen QVQ models, handling video inputs."""
+        prompts = [
+            self.processor.apply_chat_template(conv, tokenize=False, add_generation_prompt=True)
+            for conv in batch_conversations
+        ]
+        # Capture both image and video inputs from the helper utility
+        image_inputs, _ = process_vision_info(batch_conversations)
+        
+        inputs = self.processor(
+            text=prompts, 
+            images=image_inputs, 
+            padding=True, 
+            return_tensors="pt"
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
 
     def _preprocess_mllama(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Mllama models."""
@@ -688,24 +764,6 @@ class VLMWrapper:
         )
         return {k: v.to(self.device) for k, v in inputs.items()}
 
-    def _preprocess_phi35(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Phi3.5 models."""
-        processed_inputs_batch = []
-        for conv, image in zip(batch_conversations, batch_images):
-            placeholder = "<|image_1|>\n"
-            prompt = placeholder + conv[0]["content"][1]["text"]
-            messages = [{"role": "user", "content": prompt}]
-            prompt_text = self.processor.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            processed_input = self.processor(text=prompt_text, images=image, return_tensors="pt")
-            processed_inputs_batch.append({k: v.to(self.device) for k, v in processed_input.items()})
-
-        return {
-            "input_ids": torch.cat([inp["input_ids"] for inp in processed_inputs_batch]),
-            "attention_mask": torch.cat([inp["attention_mask"] for inp in processed_inputs_batch]),
-            "pixel_values": torch.cat([inp["pixel_values"] for inp in processed_inputs_batch]),
-        }
 
     def _preprocess_instructblip(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for InstructBlip models."""
@@ -804,10 +862,12 @@ class VLMWrapper:
         try:
             if self.model_type == "qwen":
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            elif self.model_type == "gemma3":
-                # Slice off the input tokens if input_len is provided
+            elif self.model_type == "qwen_qvq":
                 input_len = extra if extra is not None else 0
-                # Handle both batch and single generation
+                trimmed_ids = [g[input_len:] for g in generated_ids]
+                return self.processor.batch_decode(trimmed_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            elif self.model_type == "gemma3":
+                input_len = extra if extra is not None else 0
                 if generated_ids.dim() == 1:
                     generated_ids = generated_ids.unsqueeze(0)
                 return [self.processor.decode(g[input_len:], skip_special_tokens=True) for g in generated_ids]
@@ -816,8 +876,6 @@ class VLMWrapper:
             elif self.model_type == "llava":
                 return [self.processor.decode(g[2:], skip_special_tokens=True) for g in generated_ids]
             elif self.model_type == "llava_next":
-                return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            elif self.model_type == "phi35":
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             elif self.model_type == "instructblip":
                 decoded = self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -829,6 +887,10 @@ class VLMWrapper:
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             elif self.model_type == "minicpm":
                 return ["".join(generated_ids)]
+            elif self.model_type == "kimi":
+                input_len = extra if extra is not None else 0
+                trimmed_ids = [g[input_len:] for g in generated_ids]
+                return self.processor.batch_decode(trimmed_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             elif self.model_type == "internvl":
                 # InternVL uses batch_chat, so this shouldn't be called directly
                 return [str(generated_ids)]
@@ -861,7 +923,7 @@ class VLMWrapper:
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
-
+        
     def _generate_internvl(self, inputs: Dict[str, Any], **generation_kwargs) -> List[str]:
         """Generate using InternVL's batch_chat interface."""
         pixel_values = inputs["pixel_values"]
