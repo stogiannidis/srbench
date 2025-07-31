@@ -26,6 +26,7 @@ from transformers import (
     AutoModel,
     AutoTokenizer,
     Gemma3ForConditionalGeneration,
+    Glm4vForConditionalGeneration
 )
 from qwen_vl_utils import process_vision_info
 
@@ -136,6 +137,14 @@ MODEL_CONFIGS = {
         supports_flash_attention=True,
         padding_side="left"
     ),
+    "glm4v": ModelConfig(
+        model_class=Glm4vForConditionalGeneration,
+        processor_class=AutoProcessor,
+        requires_trust_remote_code=True,
+        supports_flash_attention=True,
+        padding_side="left",
+        processor_args={"use_fast": True}
+    ),
 }
 
 class VLMWrapper:
@@ -245,6 +254,7 @@ class VLMWrapper:
             "internvl": r"OpenGVLab/InternVL",
             "gemma3": r"google/gemma-3",
             "kimi": r"moonshotai/Kimi-VL",
+            "glm4v": r"zai-org/GLM-4",
         }
         
         for model_type, pattern in model_patterns.items():
@@ -274,6 +284,7 @@ class VLMWrapper:
             model_args.update(self.config.special_args)
             
             model = self.config.model_class.from_pretrained(self.model_id, **model_args)
+            # model = torch.compile(model, mode="default")  # Compile model for performance
             return model.eval()
             
         except Exception as e:
@@ -353,6 +364,8 @@ class VLMWrapper:
                 return self._preprocess_mllama(batch_conversations, batch_images)
             elif self.model_type in ["llava", "llava_next"]:
                 return self._preprocess_llava(batch_conversations, batch_images)
+            elif self.model_type == "glm4v":
+                return self._preprocess_glm4v(batch_conversations)
             elif self.model_type == "instructblip":
                 return self._preprocess_instructblip(batch_conversations, batch_images)
             elif self.model_type == "molmo":
@@ -364,6 +377,22 @@ class VLMWrapper:
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.model_type}: {e}")
             raise
+        
+    def _preprocess_glm4v(self, batch_conversations: List[List]) -> Dict[str, torch.Tensor]:
+        """
+        Preprocess for GLM-4V models using apply_chat_template.
+        This method relies on a recent version of transformers that can handle
+        image data (e.g., URLs) directly within the chat template.
+        """
+        inputs = self.processor.apply_chat_template(
+            batch_conversations,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            padding=True,
+            return_tensors="pt"
+        )
+        return {k: v.to(self.device) for k, v in inputs.items()}
     
     def _preprocess_kimi(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Kimi models."""
@@ -891,7 +920,9 @@ class VLMWrapper:
                 input_len = extra if extra is not None else 0
                 trimmed_ids = [g[input_len:] for g in generated_ids]
                 return self.processor.batch_decode(trimmed_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            elif self.model_type == "internvl":
+            elif self.model_type == "glm4v":
+                return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            elif self.model_type == "internvl": 
                 # InternVL uses batch_chat, so this shouldn't be called directly
                 return [str(generated_ids)]
             else:
@@ -919,7 +950,10 @@ class VLMWrapper:
             elif self.config.inference_type == "minicpm":
                 return self._generate_minicpm(inputs, **generation_kwargs)
             else:
-                return self.model.generate(**inputs, **generation_kwargs)
+                generated_ids = self.model.generate(**inputs, **generation_kwargs)
+                if self.model_type == "glm4v":
+                    input_len = inputs["input_ids"].shape[1]
+                    return generated_ids[:, input_len:]
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise

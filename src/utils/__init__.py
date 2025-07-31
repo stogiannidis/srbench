@@ -1,1 +1,1 @@
-from .vlm_helpers import VLMWrapper
+from .vlm_wrapper import VLMWrapper
