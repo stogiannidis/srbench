@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from PIL import Image
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
+from accelerate import Accelerator, init_empty_weights
+from accelerate.utils import set_seed
 from transformers import (
     Qwen2VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
@@ -148,30 +150,39 @@ MODEL_CONFIGS = {
 }
 
 class VLMWrapper:
-    """Unified Vision-Language Model wrapper supporting all model types."""
+    """Unified Vision-Language Model wrapper with Accelerate for scalable device management."""
     
-    def __init__(self, model_id: str, device_map: str = "auto", dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, model_id: str, accelerator: Optional[Accelerator] = None, dtype: torch.dtype = torch.bfloat16):
         """
-        Initialize unified VLM wrapper with automatic model type detection.
+        Initialize unified VLM wrapper with Accelerate for automatic device management.
         
         Args:
             model_id: HuggingFace model identifier
-            device_map: Device mapping strategy
+            accelerator: Accelerator instance for device management (if None, creates one)
             dtype: Model precision
         """
         self.model_id = model_id
         self.model_type = self._detect_model_type(model_id)
         self.config = MODEL_CONFIGS[self.model_type]
         self.dtype = self._validate_dtype(dtype)
-        self.device_map = self._optimize_device_map(device_map)
+        
+        # Initialize or use provided accelerator
+        if accelerator is None:
+            self.accelerator = Accelerator(
+                mixed_precision="bf16" if dtype == torch.bfloat16 else "fp16" if dtype == torch.float16 else "no",
+                gradient_accumulation_steps=1,
+                log_with=None,  # Disable logging for inference
+            )
+        else:
+            self.accelerator = accelerator
         
         # Lazy initialization
         self._model = None
         self._processor = None
-        self._device = None
         self._transform = None  # For InternVL
         
-        logger.info(f"Initialized VLMWrapper: for {self.model_type} model: {model_id}")
+        logger.info(f"Initialized VLMWrapper for {self.model_type} model: {model_id}")
+        logger.info(f"Using device: {self.accelerator.device}, num_processes: {self.accelerator.num_processes}")
 
     @property
     def model(self):
@@ -189,10 +200,8 @@ class VLMWrapper:
 
     @property
     def device(self):
-        """Get model device."""
-        if self._device is None:
-            self._device = self.model.device
-        return self._device
+        """Get accelerator device."""
+        return self.accelerator.device
 
     @property
     def transform(self):
@@ -202,11 +211,7 @@ class VLMWrapper:
         return self._transform
 
     def _validate_dtype(self, dtype: torch.dtype) -> torch.dtype:
-        """Validate and optimize dtype based on hardware capabilities."""
-        if not torch.cuda.is_available():
-            logger.warning("CUDA not available, using float32")
-            return torch.float32
-        
+        """Validate and optimize dtype based on accelerator capabilities."""
         # Force float16 for InstructBLIP to avoid dtype mismatch errors
         if self.model_type == "instructblip":
             logger.info("Using float16 for InstructBLIP to avoid dtype mismatch")
@@ -217,26 +222,7 @@ class VLMWrapper:
             logger.info("Using float16 for InternVL to avoid dtype mismatch")
             return torch.float16
         
-        if torch.cuda.get_device_capability()[0] < 8 and dtype == torch.bfloat16:
-            logger.warning("GPU doesn't support bfloat16, falling back to float16")
-            return torch.float16
-            
         return dtype
-
-    def _optimize_device_map(self, device_map: str) -> str:
-        """Optimize device mapping based on available hardware."""
-        if device_map == "auto":
-            if torch.cuda.is_available():
-                gpu_count = torch.cuda.device_count()
-                if gpu_count > 1:
-                    logger.info(f"Multiple GPUs detected ({gpu_count}), using auto device mapping")
-                    return "auto"
-                else:
-                    return "cuda:0"
-            else:
-                logger.warning("CUDA not available, using CPU")
-                return "cpu"
-        return device_map
 
     def _detect_model_type(self, model_id: str) -> str:
         """Detect model type from model_id."""
@@ -264,11 +250,10 @@ class VLMWrapper:
         raise ValueError(f"Unsupported model_id: {model_id}")
 
     def _load_model(self):
-        """Load model with optimized settings."""
+        """Load model with Accelerate device management."""
         try:
             model_args = {
                 "torch_dtype": self.dtype,
-                "device_map": self.device_map,
             }
             
             if self.config.requires_trust_remote_code:
@@ -283,8 +268,12 @@ class VLMWrapper:
             # Add special arguments
             model_args.update(self.config.special_args)
             
-            model = self.config.model_class.from_pretrained(self.model_id, **model_args)
-            # model = torch.compile(model, mode="default")  # Compile model for performance
+            # Use Accelerate's empty weights context for memory efficiency
+            with init_empty_weights():
+                model = self.config.model_class.from_pretrained(self.model_id, **model_args)
+            
+            # Prepare model with Accelerate
+            model = self.accelerator.prepare(model)
             return model.eval()
             
         except Exception as e:
@@ -381,8 +370,6 @@ class VLMWrapper:
     def _preprocess_glm4v(self, batch_conversations: List[List]) -> Dict[str, torch.Tensor]:
         """
         Preprocess for GLM-4V models using apply_chat_template.
-        This method relies on a recent version of transformers that can handle
-        image data (e.g., URLs) directly within the chat template.
         """
         inputs = self.processor.apply_chat_template(
             batch_conversations,
@@ -398,8 +385,6 @@ class VLMWrapper:
         """Preprocess for Kimi models."""
         
         # Kimi's processor can handle multiple images per conversation
-        # This implementation assumes that if multiple images are provided,
-        # they all belong to the single conversation in the batch.
         if len(batch_conversations) > 1 and len(batch_images) > 1:
             logger.warning("Kimi wrapper handles multiple images for a single conversation, not for a batch of conversations. Processing one image per conversation.")
             images_to_process = [[img] for img in batch_images]
@@ -424,7 +409,6 @@ class VLMWrapper:
                 messages.append({"role": turn['role'], "content": content_list})
 
             # 2. First processing step: apply chat template
-            # Note: The Kimi processor expects the tokenized output as input for the next step
             text_inputs = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, return_tensors="pt"
             )
@@ -485,20 +469,14 @@ class VLMWrapper:
             return {k: v.to(self.device) for k, v in processed_inputs[0].items()}
         else:
             batched_inputs = {}
-            # This simple batching might fail if sequences have different lengths.
-            # A more robust implementation would pad to the max length in the batch.
             for key in processed_inputs[0].keys():
                 batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs], dim=0)
             
             return {k: v.to(self.device) for k, v in batched_inputs.items()}
 
-
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
-        A more robust preprocessing function for InternVL models.
-
-        It handles single or batch conversations, safely parses content, and ensures
-        correct dtype conversion based on the model's configuration.
+        A more robust preprocessing function for InternVL models with Accelerate device management.
         """
         # 1. Simplify batch handling: always work with a list of conversations
         conversation_list = conversation if isinstance(conversation[0], list) else [conversation]
@@ -533,19 +511,15 @@ class VLMWrapper:
         if all_pixel_values:
             pixel_values_tensor = torch.cat(all_pixel_values, dim=0)
         else:
-            # Create an empty tensor with the correct number of dimensions
             pixel_values_tensor = torch.empty(0, 3, 448, 448) 
 
-        # 3. Correctly move to device with the model's dtype
-        # This prevents dtype mismatches regardless of the device (CPU, CUDA, MPS)
-        model_dtype = self.model.dtype if hasattr(self, 'model') else torch.bfloat16
-        pixel_values_tensor = pixel_values_tensor.to(device=self.device, dtype=model_dtype)
+        # 3. Use accelerator device and dtype
+        pixel_values_tensor = pixel_values_tensor.to(device=self.device, dtype=self.dtype)
 
         return {
             "pixel_values": pixel_values_tensor,
             "questions": questions,
             "num_patches_list": num_patches_list,
-        
         }
 
     def _preprocess_minicpm(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Tuple:
@@ -571,6 +545,7 @@ class VLMWrapper:
             msgs = [{"role": "user", "content": [np_img, question]}]
             return msgs
 
+    # ...existing image processing methods...
     def _load_image_internvl(self, image_input: Any, input_size: int = 448, max_num: int = 12) -> torch.Tensor:
         """Load and preprocess image for InternVL with dynamic preprocessing."""
         try:
@@ -703,7 +678,7 @@ class VLMWrapper:
 
         return batch_conversations, batch_images
 
-    # Standard preprocessing methods (similar to original vlm_helpers.py)
+    # Standard preprocessing methods
     def _preprocess_qwen(self, batch_conversations: List[List]) -> Dict[str, torch.Tensor]:
         """Preprocess for Qwen models."""
         prompts = [
@@ -780,7 +755,6 @@ class VLMWrapper:
             
             return {k: v.to(self.device) for k, v in batched_inputs.items()}
 
-    # ...existing code... (other preprocessing methods remain the same)
     def _preprocess_llava(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Llava models."""
         prompts = [
@@ -792,7 +766,6 @@ class VLMWrapper:
             return_tensors="pt", padding=True, truncation=True
         )
         return {k: v.to(self.device) for k, v in inputs.items()}
-
 
     def _preprocess_instructblip(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for InstructBlip models."""
@@ -878,16 +851,7 @@ class VLMWrapper:
             return {k: v.to(self.device) for k, v in batched_inputs.items()}
 
     def decode(self, generated_ids: torch.Tensor, extra: Optional[int] = None) -> List[str]:
-        """
-        Decode generated token IDs to text.
-        
-        Args:
-            generated_ids: Generated token IDs from model
-            extra: Additional parameter (e.g., input length for some models)
-            
-        Returns:
-            List of decoded text strings
-        """
+        """Decode generated token IDs to text."""
         try:
             if self.model_type == "qwen":
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -923,7 +887,6 @@ class VLMWrapper:
             elif self.model_type == "glm4v":
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             elif self.model_type == "internvl": 
-                # InternVL uses batch_chat, so this shouldn't be called directly
                 return [str(generated_ids)]
             else:
                 return self.processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -934,26 +897,20 @@ class VLMWrapper:
 
     @torch.inference_mode()
     def generate(self, inputs: Any, **generation_kwargs) -> Any:
-        """
-        Generate text using the model with unified interface.
-        
-        Args:
-            inputs: Preprocessed inputs
-            **generation_kwargs: Generation parameters
-            
-        Returns:
-            Generated outputs (format depends on model type)
-        """
+        """Generate text using the model with unified interface and automatic mixed precision."""
         try:
             if self.config.inference_type == "internvl":
                 return self._generate_internvl(inputs, **generation_kwargs)
             elif self.config.inference_type == "minicpm":
                 return self._generate_minicpm(inputs, **generation_kwargs)
             else:
-                generated_ids = self.model.generate(**inputs, **generation_kwargs)
-                if self.model_type == "glm4v":
-                    input_len = inputs["input_ids"].shape[1]
-                    return generated_ids[:, input_len:]
+                # Use accelerator's autocast for automatic mixed precision
+                with self.accelerator.autocast():
+                    generated_ids = self.model.generate(**inputs, **generation_kwargs)
+                    if self.model_type == "glm4v":
+                        input_len = inputs["input_ids"].shape[1]
+                        return generated_ids[:, input_len:]
+                    return generated_ids
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
@@ -972,8 +929,8 @@ class VLMWrapper:
         }
         generation_config.update(generation_kwargs)
         
-        # Run batch inference with updated autocast
-        with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
+        # Run batch inference with accelerator's autocast
+        with self.accelerator.autocast():
             responses = self.model.batch_chat(
                 self.processor,
                 pixel_values,
@@ -1020,23 +977,21 @@ class VLMWrapper:
 
     @contextmanager
     def memory_efficient_mode(self):
-        """Context manager for memory-efficient inference."""
+        """Context manager for memory-efficient inference with Accelerate."""
         original_grad_state = torch.is_grad_enabled()
         try:
             torch.set_grad_enabled(False)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.accelerator.free_memory()
             yield
         finally:
             torch.set_grad_enabled(original_grad_state)
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self.accelerator.free_memory()
 
     def __del__(self):
         """Cleanup resources."""
         try:
-            if torch is not None and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if hasattr(self, 'accelerator'):
+                self.accelerator.free_memory()
         except Exception:
             pass
 

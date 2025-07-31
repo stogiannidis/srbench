@@ -53,3 +53,27 @@ for MODEL in "${models[@]}"; do
 
 done
 
+
+# #!/bin/bash
+
+# # Directory to process
+# DIR="output/evaluations/srbench/baseline/"
+
+# # Check if directory exists
+# if [[ ! -d "$DIR" ]]; then
+#     echo "Error: Directory '$DIR' does not exist"
+#     exit 1
+# fi
+
+# echo "Processing all CSV files in: $DIR"
+# echo "================================"
+
+# # Run the Python script to process all CSV files in the directory
+# if python src/eval/clean_eval.py "$DIR" --no-few-shot; then
+#     echo "✓ Successfully processed all CSV files in the directory"
+# else
+#     echo "✗ Failed to process CSV files"
+#     exit 1
+# fi
+
+# echo "All files have been updated in-place with cleaned responses"

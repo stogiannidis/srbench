@@ -14,6 +14,8 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 
 from utils.vlm_wrapper import VLMWrapper
 
@@ -29,29 +31,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class EvaluationEngine:
-    """Evaluation engine for all VLM types with enhanced features."""
+    """Evaluation engine for all VLM types with Accelerate for scalable device management."""
     
-    def __init__(self, model_id: str, device_map: str = "auto", seed: int = 42, 
-                 use_cot: bool = False, one_shot_example: Optional[Dict] = None):
+    def __init__(self, model_id: str, seed: int = 42, use_cot: bool = False, 
+                 one_shot_example: Optional[Dict] = None, mixed_precision: str = "bf16"):
         """
-        Initialize the evaluation engine.
+        Initialize the evaluation engine with Accelerate for automatic scaling.
         
         Args:
             model_id: HuggingFace model identifier
-            device_map: Device mapping strategy
             seed: Random seed for reproducibility
             use_cot: Enable Chain-of-Thought prompting
             one_shot_example: One-shot example dictionary
+            mixed_precision: Mixed precision mode ("bf16", "fp16", "no")
         """
         self.model_id = model_id
         self.short_name = self._extract_model_name(model_id)
-        self.device_map = device_map
         self.seed = seed
         self.use_cot = use_cot
         self.one_shot_example = one_shot_example
         
-        # Initialize reproducibility
-        self._set_seed(seed)
+        # Initialize Accelerator for automatic device management and scaling
+        self.accelerator = Accelerator(
+            mixed_precision=mixed_precision,
+            gradient_accumulation_steps=1,
+            log_with=None,  # Disable logging for inference
+            project_dir="./output/accelerate_logs",
+        )
+        
+        # Set reproducibility with Accelerate's utility
+        set_seed(seed, device_specific=True)
         
         # Lazy initialization
         self.vlm = None
@@ -64,28 +73,15 @@ class EvaluationEngine:
             "has_one_shot": one_shot_example is not None,
             "timestamp": datetime.now().isoformat(),
             "torch_version": torch.__version__,
+            "accelerate_version": self.accelerator.state.accelerate_version if hasattr(self.accelerator.state, 'accelerate_version') else "unknown",
+            "device": str(self.accelerator.device),
+            "num_processes": self.accelerator.num_processes,
+            "mixed_precision": mixed_precision,
         }
         
         logger.info(f"Initialized EvaluationEngine for model: {model_id}")
-        logger.info(f"Seed: {seed}, CoT: {use_cot}, One-shot: {one_shot_example is not None}")
-    
-    def _set_seed(self, seed: int):
-        """Set all random seeds for reproducibility."""
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-            # Make cudnn deterministic
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-        
-        # Set environment variables for reproducibility
-        os.environ['PYTHONHASHSEED'] = str(seed)
-        os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'  # For deterministic CUDA operations
-        
-        logger.info(f"Set all seeds to {seed} for reproducibility")
+        logger.info(f"Using Accelerate - Device: {self.accelerator.device}, Processes: {self.accelerator.num_processes}")
+        logger.info(f"Mixed precision: {mixed_precision}, Seed: {seed}, CoT: {use_cot}, One-shot: {one_shot_example is not None}")
     
     def _extract_model_name(self, model_id: str) -> str:
         """Extract a clean model name for file naming."""
@@ -97,17 +93,19 @@ class EvaluationEngine:
         return hashlib.md5(config_str.encode()).hexdigest()[:8]
     
     def _load_model(self):
-        """Load the VLM model lazily to save memory."""
+        """Load the VLM model using Accelerate for automatic device management."""
         if self.vlm is None:
             logger.info(f"Loading model: {self.model_id}")
-            self.vlm = VLMWrapper(self.model_id, self.device_map)
-            logger.info("Model loaded successfully")
+            
+            # Create VLMWrapper with shared Accelerator instance
+            self.vlm = VLMWrapper(self.model_id, accelerator=self.accelerator)
+            
+            logger.info("Model loaded successfully with Accelerate")
             
             # Add model-specific metadata
             self.eval_metadata.update({
                 "model_type": self.vlm.model_type,
                 "inference_type": self.vlm.config.inference_type,
-                "device_map": self.device_map,
                 "dtype": str(self.vlm.dtype),
             })
     
@@ -168,16 +166,7 @@ class EvaluationEngine:
         return cot_prompt
     
     def _trim_response(self, response: str, original_question: str) -> str:
-        """
-        Remove the original prompt/question from the response if it appears.
-        
-        Args:
-            response: The full model response
-            original_question: The original question to remove
-            
-        Returns:
-            Cleaned response without the original prompt
-        """
+        """Remove the original prompt/question from the response if it appears."""
         if not isinstance(response, str):
             response = str(response)
         
@@ -207,17 +196,7 @@ class EvaluationEngine:
         return response
     
     def _process_batch(self, batch: Dict[str, List], batch_idx: int, total_batches: int) -> List[Dict[str, str]]:
-        """
-        Process a single batch of examples with unified interface.
-        
-        Args:
-            batch: Dictionary containing batch data
-            batch_idx: Current batch index
-            total_batches: Total number of batches
-            
-        Returns:
-            List of results for this batch
-        """
+        """Process a single batch of examples with Accelerate automatic mixed precision."""
         try:
             batch_size = len(batch["question"])
             logger.debug(f"Processing batch {batch_idx + 1}/{total_batches} with {batch_size} examples")
@@ -225,7 +204,7 @@ class EvaluationEngine:
             # Prepare inputs
             messages = self._prepare_messages(batch["question"], batch["image"])
             
-            # Unified batch processing leveraging unified preprocessing in VLMWrapper
+            # Process batch with Accelerate's automatic mixed precision
             results = self._process_batch_standard(messages, batch, batch_idx)
             
             return results
@@ -243,7 +222,7 @@ class EvaluationEngine:
             } for idx, (question, answer) in enumerate(zip(batch["question"], batch["answer"]))]
     
     def _process_batch_standard(self, messages: List[List[Dict]], batch: Dict[str, List], batch_idx: int) -> List[Dict[str, str]]:
-        """Process batch for standard VLM models."""
+        """Process batch for standard VLM models with Accelerate optimizations."""
         results = []
         
         # Process each example individually to avoid batching issues
@@ -255,14 +234,13 @@ class EvaluationEngine:
                     # Preprocess
                     inputs = self.vlm.preprocess(conversation=[message], image_input=[image])
                     
-                    # Generate responses
-                    with torch.autocast('cuda', enabled=torch.cuda.is_available()):
-                        generated_ids = self.vlm.generate(
-                            inputs,
-                            max_new_tokens=512,
-                            do_sample=False,
-                            pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
-                        )
+                    # Generate responses with Accelerate's automatic mixed precision
+                    generated_ids = self.vlm.generate(
+                        inputs,
+                        max_new_tokens=512,
+                        do_sample=False,
+                        pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
+                    )
                     
                     # Calculate input length for proper decoding
                     input_length = inputs.get("input_ids", torch.tensor([])).shape[-1] if isinstance(inputs, dict) and "input_ids" in inputs else 0
@@ -280,10 +258,9 @@ class EvaluationEngine:
                     # Extract single response
                     raw_prediction = output_texts[0] if isinstance(output_texts, list) else output_texts
                     
-                    # Clean up GPU memory
+                    # Clean up memory efficiently
                     del inputs, generated_ids
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    self.accelerator.free_memory()
                     
                     # Trim the response
                     cleaned_response = self._trim_response(raw_prediction, question)
@@ -312,19 +289,8 @@ class EvaluationEngine:
     
     def evaluate(self, dataset_id: str, batch_size: int = 16, max_samples: Optional[int] = None, 
                 sample_strategy: str = "first") -> str:
-        """
-        Evaluate the model on the specified dataset with reproducible sampling.
-        
-        Args:
-            dataset_id: HuggingFace dataset identifier
-            batch_size: Number of examples per batch
-            max_samples: Maximum number of samples to process
-            sample_strategy: Sampling strategy ("first", "random", "stratified")
-            
-        Returns:
-            Path to the saved results CSV file
-        """
-        logger.info(f"Starting reproducible evaluation on dataset: {dataset_id}")
+        """Evaluate the model on the specified dataset with Accelerate for scalable processing."""
+        logger.info(f"Starting evaluation on dataset: {dataset_id}")
         logger.info(f"Sampling strategy: {sample_strategy}, Max samples: {max_samples}")
         
         if self.use_cot:
@@ -332,25 +298,36 @@ class EvaluationEngine:
         if self.one_shot_example:
             logger.info("One-shot example provided")
         
-        # Load model lazily
+        # Load model with Accelerate
         self._load_model()
         
         # Load and sample dataset
         try:
-            data = load_dataset(dataset_id, split="train")
-            original_size = len(data)
+            # Only load on main process to avoid duplication
+            if self.accelerator.is_main_process:
+                data = load_dataset(dataset_id, split="train")
+                original_size = len(data)
+                
+                # Apply sampling strategy
+                if max_samples and max_samples < original_size:
+                    data = self._sample_dataset(data, max_samples, sample_strategy)
+                
+                logger.info(f"Loaded dataset: {original_size} total, {len(data)} selected samples")
+            else:
+                data = None
+                original_size = 0
             
-            # Apply sampling strategy
-            if max_samples and max_samples < original_size:
-                data = self._sample_dataset(data, max_samples, sample_strategy)
+            # Wait for all processes and broadcast dataset
+            data = self.accelerator.broadcast_object_list([data])[0] if self.accelerator.num_processes > 1 else data
             
-            logger.info(f"Loaded dataset: {original_size} total, {len(data)} selected samples")
+            if data is None:
+                raise ValueError("Failed to load dataset")
             
             # Add dataset hash to metadata
             self.eval_metadata.update({
                 "dataset_id": dataset_id,
                 "dataset_hash": self._compute_dataset_hash(dataset_id, max_samples),
-                "original_size": original_size,
+                "original_size": len(data) if hasattr(data, '__len__') else original_size,
                 "sampled_size": len(data),
                 "sample_strategy": sample_strategy,
                 "max_samples": max_samples,
@@ -366,39 +343,58 @@ class EvaluationEngine:
         if missing_columns:
             raise ValueError(f"Dataset missing required columns: {missing_columns}")
         
-        # Process dataset in batches
+        # Process dataset in batches with Accelerate-aware batch sizing
         all_results = []
-        total_batches = (len(data) + batch_size - 1) // batch_size
         
-        # Adjust batch size for special model types
+        # Adjust batch size based on available memory and number of processes
+        effective_batch_size = max(1, batch_size // self.accelerator.num_processes)
+        total_batches = (len(data) + effective_batch_size - 1) // effective_batch_size
+        
+        # Special model type adjustments
         if self.vlm.config.inference_type in ["internvl", "minicpm"]:
-            # These models can handle larger batches more efficiently
-            batch_size = min(batch_size, 8)  # Cap at 8 for memory safety
+            effective_batch_size = min(effective_batch_size, 4)  # Conservative for memory
         
-        with tqdm(total=total_batches, desc="Processing batches", colour="green") as pbar:
-            for i in range(0, len(data), batch_size):
-                batch = data[i:i + batch_size]
-                batch_results = self._process_batch(batch, i // batch_size, total_batches)
+        logger.info(f"Processing with effective batch size: {effective_batch_size} (total processes: {self.accelerator.num_processes})")
+        
+        with tqdm(total=total_batches, desc="Processing batches", colour="green", disable=not self.accelerator.is_main_process) as pbar:
+            for i in range(0, len(data), effective_batch_size):
+                batch = data[i:i + effective_batch_size]
+                batch_results = self._process_batch(batch, i // effective_batch_size, total_batches)
                 all_results.extend(batch_results)
                 
-                pbar.update(1)
-                pbar.set_postfix({
-                    "processed": len(all_results),
-                    "memory": f"{torch.cuda.memory_allocated() / 1e9:.1f}GB" if torch.cuda.is_available() else "N/A",
-                    "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
-                })
+                if self.accelerator.is_main_process:
+                    pbar.update(1)
+                    memory_info = f"{torch.cuda.memory_allocated() / 1e9:.1f}GB" if torch.cuda.is_available() else "N/A"
+                    success_rate = f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
+                    pbar.set_postfix({
+                        "processed": len(all_results),
+                        "memory": memory_info,
+                        "success_rate": success_rate
+                    })
                 
-                # Periodic garbage collection
-                if (i // batch_size) % 10 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                # Periodic cleanup
+                if (i // effective_batch_size) % 10 == 0:
+                    self.accelerator.free_memory()
         
-        # Save results with metadata
-        output_path = self._save_results_with_metadata(all_results, dataset_id)
-        logger.info(f"Evaluation completed. Results saved to: {output_path}")
+        # Gather results from all processes if using multiple GPUs
+        if self.accelerator.num_processes > 1:
+            all_results = self.accelerator.gather_object(all_results)
+            # Flatten list of lists from different processes
+            if isinstance(all_results[0], list):
+                flattened_results = []
+                for process_results in all_results:
+                    flattened_results.extend(process_results)
+                all_results = flattened_results
         
-        return output_path
+        # Save results with metadata (only on main process)
+        if self.accelerator.is_main_process:
+            output_path = self._save_results_with_metadata(all_results, dataset_id)
+            logger.info(f"Evaluation completed. Results saved to: {output_path}")
+            return output_path
+        else:
+            # Non-main processes wait for completion
+            self.accelerator.wait_for_everyone()
+            return ""
     
     def _sample_dataset(self, dataset: Dataset, max_samples: int, strategy: str) -> Dataset:
         """Sample dataset using specified strategy for reproducibility."""
@@ -563,9 +559,9 @@ def load_one_shot_example(json_path: str) -> Optional[Dict]:
 
 
 def parse_args():
-    """Parse command-line arguments with comprehensive options."""
+    """Parse command-line arguments with Accelerate options."""
     parser = argparse.ArgumentParser(
-        description="Reproducible evaluation of vision-language models",
+        description="Scalable evaluation of vision-language models with Accelerate",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -581,7 +577,7 @@ def parse_args():
     parser.add_argument(
         "-b", "--batch_size",
         type=int, default=16,
-        help="Batch size for processing"
+        help="Batch size for processing (will be divided across GPUs automatically)"
     )
     parser.add_argument(
         "--max_samples",
@@ -594,9 +590,9 @@ def parse_args():
         help="Sampling strategy for subset selection"
     )
     parser.add_argument(
-        "--device_map",
-        type=str, default="auto",
-        help="Device mapping strategy"
+        "--mixed_precision",
+        type=str, default="bf16", choices=["bf16", "fp16", "no"],
+        help="Mixed precision mode for Accelerate"
     )
     parser.add_argument(
         "--seed",
@@ -623,7 +619,7 @@ def parse_args():
 
 
 def main():
-    """Main function with comprehensive error handling."""
+    """Main function with Accelerate integration for scalable evaluation."""
     args = parse_args()
     
     if args.verbose:
@@ -633,13 +629,13 @@ def main():
     one_shot_example = load_one_shot_example(args.one_shot) if args.one_shot else None
     
     try:
-        # Create reproducible evaluation engine
+        # Create evaluation engine with Accelerate
         eval_engine = EvaluationEngine(
             model_id=args.model,
-            device_map=args.device_map,
             seed=args.seed,
             use_cot=args.cot,
-            one_shot_example=one_shot_example
+            one_shot_example=one_shot_example,
+            mixed_precision=args.mixed_precision
         )
         
         output_path = eval_engine.evaluate(
@@ -649,9 +645,11 @@ def main():
             sample_strategy=args.sample_strategy
         )
         
-        print(f"\n✅ Reproducible evaluation completed successfully!")
-        print(f"📁 Results saved to: {output_path}")
-        print(f"🔄 Evaluation can be reproduced using seed: {args.seed}")
+        if eval_engine.accelerator.is_main_process:
+            print(f"\n✅ Scalable evaluation completed successfully!")
+            print(f"📁 Results saved to: {output_path}")
+            print(f"🔄 Evaluation can be reproduced using seed: {args.seed}")
+            print(f"⚡ Processed with {eval_engine.accelerator.num_processes} process(es) using Accelerate")
         
     except KeyboardInterrupt:
         logger.info("Evaluation interrupted by user")
