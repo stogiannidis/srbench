@@ -246,48 +246,41 @@ class EvaluationEngine:
         """Process batch for standard VLM models."""
         results = []
         
-        # Process each example individually to avoid batching issues
-        for idx, (message, question, ground_truth, image) in enumerate(
-            zip(messages, batch["question"], batch["answer"], batch["image"])
-        ):
-            try:
-                with self.vlm.memory_efficient_mode():
-                    # Preprocess
-                    inputs = self.vlm.preprocess(conversation=[message], image_input=[image])
-                    
-                    # Generate responses
-                    with torch.autocast('cuda', enabled=torch.cuda.is_available()):
-                        generated_ids = self.vlm.generate(
-                            inputs,
-                            max_new_tokens=512,
-                            do_sample=False,
-                            pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
-                        )
-                    
-                    # Calculate input length for proper decoding
-                    input_length = inputs.get("input_ids", torch.tensor([])).shape[-1] if isinstance(inputs, dict) and "input_ids" in inputs else 0
-                    
-                    # Decode responses
-                    if self.vlm.model_type == "molmo":
-                        output_texts = self.vlm.decode(generated_ids, extra=input_length)
-                    else:
-                        # For most models, we need to trim the input tokens
-                        if hasattr(generated_ids, 'shape') and len(generated_ids.shape) > 1:
-                            if self.vlm.model_type not in ["minicpm"]:
-                                generated_ids = generated_ids[:, input_length:]
-                        output_texts = self.vlm.decode(generated_ids)
-                    
-                    # Extract single response
-                    raw_prediction = output_texts[0] if isinstance(output_texts, list) else output_texts
-                    
-                    # Clean up GPU memory
-                    del inputs, generated_ids
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    
-                    # Trim the response
+        try:
+            with self.vlm.memory_efficient_mode():
+                # Preprocess the entire batch
+                inputs = self.vlm.preprocess(conversation=messages, image_input=batch["image"])
+                
+                # Generate responses for the batch
+                with torch.autocast('cuda', enabled=torch.cuda.is_available()):
+                    generated_ids = self.vlm.generate(
+                        inputs,
+                        max_new_tokens=512,
+                        do_sample=False,
+                        pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
+                    )
+                
+                # Calculate input length for proper decoding
+                input_length = inputs.get("input_ids", torch.tensor([])).shape[-1] if isinstance(inputs, dict) and "input_ids" in inputs else 0
+                
+                # Decode responses
+                if self.vlm.model_type == "molmo":
+                    output_texts = self.vlm.decode(generated_ids, extra=input_length)
+                else:
+                    # For most models, we need to trim the input tokens
+                    if hasattr(generated_ids, 'shape') and len(generated_ids.shape) > 1:
+                        if self.vlm.model_type not in ["minicpm"]:
+                            generated_ids = generated_ids[:, input_length:]
+                    output_texts = self.vlm.decode(generated_ids)
+                
+                # Clean up GPU memory
+                del inputs, generated_ids
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # Process results for each example in the batch
+                for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
                     cleaned_response = self._trim_response(raw_prediction, question)
-                    
                     results.append({
                         "response": cleaned_response,
                         "answer": ground_truth,
@@ -296,18 +289,20 @@ class EvaluationEngine:
                         "batch_idx": batch_idx,
                         "example_idx": idx,
                     })
-                    
-            except Exception as e:
-                logger.error(f"Error processing example {idx} in batch {batch_idx + 1}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error processing batch {batch_idx + 1}: {e}")
+            # Return error results for the entire batch
+            for idx, (question, answer) in enumerate(zip(batch["question"], batch["answer"])):
                 results.append({
                     "response": f"ERROR: {str(e)}",
-                    "answer": ground_truth,
+                    "answer": answer,
                     "question": question,
                     "raw_response": f"ERROR: {str(e)}",
                     "batch_idx": batch_idx,
                     "example_idx": idx,
                 })
-        
+
         return results
     
     def evaluate(self, dataset_id: str, batch_size: int = 16, max_samples: Optional[int] = None, 

@@ -445,8 +445,8 @@ class VLMWrapper:
             return {k: v.to(self.device) for k, v in batched_inputs.items()}
         
     def _preprocess_gemma3(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Gemma 3 models."""
-        processed_inputs = []
+        """Preprocess for Gemma 3 models efficiently in a batch."""
+        batch_messages = []
         for i, conv in enumerate(batch_conversations):
             # Extract image and text from the conversation
             image_content = next((item['image'] for item in conv[0]['content'] if 'image' in item), None)
@@ -458,40 +458,32 @@ class VLMWrapper:
             if image is None:
                 raise ValueError(f"No image provided for Gemma 3 conversation {i}")
 
-            # Construct the messages in the format Gemma 3 expects
+            # Construct the messages for this single conversation
             messages = [
-                {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant."}]},
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are a helpful assistant."}]
+                },
                 {
                     "role": "user",
                     "content": [
                         {"type": "image", "image": image},
-                        {"type": "text", "text": text_content}
-                    ]
+                        {"type": "text", "text": text_content}]
                 }
             ]
+            batch_messages.append(messages)
 
-            # Apply the chat template
-            inputs = self.processor.apply_chat_template(
-                messages, 
-                add_generation_prompt=True, 
-                tokenize=True,
-                return_dict=True, 
-                return_tensors="pt"
-            )
-            processed_inputs.append(inputs)
+        # The processor's apply_chat_template can handle batching, tokenization, and padding
+        inputs = self.processor.apply_chat_template(
+            batch_messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            padding=True,
+            return_tensors="pt"
+        ).to(self.device, dtype=self.dtype)
 
-        # Batch the processed inputs
-        if len(processed_inputs) == 1:
-            return {k: v.to(self.device) for k, v in processed_inputs[0].items()}
-        else:
-            batched_inputs = {}
-            # This simple batching might fail if sequences have different lengths.
-            # A more robust implementation would pad to the max length in the batch.
-            for key in processed_inputs[0].keys():
-                batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs], dim=0)
-            
-            return {k: v.to(self.device) for k, v in batched_inputs.items()}
-
+        return inputs
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
@@ -733,54 +725,34 @@ class VLMWrapper:
 
     def _preprocess_mllama(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Mllama models."""
-        processed_inputs = []
+        prompts = []
+        all_images = []
         
         for i, conv in enumerate(batch_conversations):
-            try:
-                prompt = self.processor.apply_chat_template(conv, add_generation_prompt=True)
-                image_token_count = prompt.count('<|image|>')
-                
-                if batch_images and i < len(batch_images):
-                    current_image = batch_images[i]
-                    if image_token_count > 1:
-                        current_images = [current_image] * image_token_count
-                    else:
-                        current_images = [current_image] if image_token_count > 0 else None
-                else:
-                    current_images = None
-                
-                if current_images:
-                    inputs = self.processor(
-                        current_images, [prompt], add_special_tokens=False,
-                        return_tensors="pt", padding=True, truncation=True
-                    )
-                else:
-                    inputs = self.processor(
-                        None, [prompt], add_special_tokens=False,
-                        return_tensors="pt", padding=True, truncation=True
-                    )
-                
-                processed_inputs.append(inputs)
-                
-            except Exception as e:
-                logger.error(f"Error preprocessing Mllama conversation {i}: {e}")
-                raise
-        
-        # Batch the processed inputs
-        if len(processed_inputs) == 1:
-            return {k: v.to(self.device) for k, v in processed_inputs[0].items()}
-        else:
-            batched_inputs = {}
-            for key in processed_inputs[0].keys():
-                try:
-                    batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs], dim=0)
-                except Exception as e:
-                    logger.warning(f"Could not batch {key} for Mllama: {e}")
-                    batched_inputs[key] = processed_inputs[0][key]
+            prompt = self.processor.apply_chat_template(conv, add_generation_prompt=True)
+            prompts.append(prompt)
             
-            return {k: v.to(self.device) for k, v in batched_inputs.items()}
+            image_token_count = prompt.count('<|image|>')
+            
+            if batch_images and i < len(batch_images):
+                current_image = batch_images[i]
+                if image_token_count > 0:
+                    all_images.extend([current_image] * image_token_count)
+        
+        if all_images:
+            inputs = self.processor(
+                all_images, prompts, add_special_tokens=False,
+                return_tensors="pt", padding=True, truncation=True
+            )
+        else:
+            inputs = self.processor(
+                None, prompts, add_special_tokens=False,
+                return_tensors="pt", padding=True, truncation=True
+            )
+            
+        return {k: v.to(self.device) for k, v in inputs.items()}
 
-    # ...existing code... (other preprocessing methods remain the same)
+
     def _preprocess_llava(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Llava models."""
         prompts = [
@@ -951,9 +923,10 @@ class VLMWrapper:
                 return self._generate_minicpm(inputs, **generation_kwargs)
             else:
                 generated_ids = self.model.generate(**inputs, **generation_kwargs)
-                if self.model_type == "glm4v":
-                    input_len = inputs["input_ids"].shape[1]
-                    return generated_ids[:, input_len:]
+                input_len = inputs["input_ids"].shape[-1]
+                if self.config.inference_type == "gemma3":
+                    generated_ids = generated_ids[:, input_len:]
+                return generated_ids[:, input_len:]
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
