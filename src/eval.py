@@ -227,15 +227,11 @@ class EvaluationEngine:
 
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=512,
-                do_sample=False,
-                pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
+                max_new_tokens=1024,
+                do_sample=False
             )
             
-            # Slice the generated id to keep only the generated text
-            ids_to_decode = generated_ids[:, inputs["input_ids"].shape[1]:] if inputs["input_ids"].shape[1] > 0 else generated_ids
-            
-            output_texts = self.vlm.decode(ids_to_decode)
+            output_texts = self.vlm.decode(generated_ids)
 
 
             # Process results for each example in the batch
@@ -416,17 +412,6 @@ class EvaluationEngine:
             return "oneshot"
         else:
             return "_test"
-
-    def _get_strategy_description(self) -> str:
-        """Get human-readable description of prompting strategy."""
-        if self.use_cot and self.one_shot_example:
-            return "Chain-of-Thought + One-shot Example"
-        elif self.use_cot:
-            return "Chain-of-Thought"
-        elif self.one_shot_example:
-            return "One-shot Example"
-        else:
-            return "Baseline (No special prompting)"
 
 
 def load_one_shot_example(json_path: str) -> Optional[Dict]:

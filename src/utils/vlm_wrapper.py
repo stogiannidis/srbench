@@ -29,7 +29,7 @@ from transformers import (
 from qwen_vl_utils import process_vision_info
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Constants for InternVL
@@ -60,7 +60,7 @@ MODEL_CONFIGS = {
         model_class=Qwen2_5_VLForConditionalGeneration,
         processor_class=AutoProcessor,
         supports_flash_attention=True,
-        processor_args={"use_fast": True, "padding_side": "left"},
+        processor_args={"use_fast": True},
     ),
     "kimi": ModelConfig(
         model_class=AutoModelForCausalLM,
@@ -117,7 +117,7 @@ MODEL_CONFIGS = {
         model_class=Gemma3ForConditionalGeneration,
         processor_class=AutoProcessor,
         supports_flash_attention=True,
-        processor_args={"use_fast": True, "padding_side": "left"},
+        processor_args={"use_fast": True},
     ),
     "glm4v": ModelConfig(
         model_class=Glm4vForConditionalGeneration,
@@ -265,6 +265,7 @@ class VLMWrapper:
             if hasattr(processor, "tokenizer"):
                 processor.tokenizer.padding_side = self.config.padding_side
                 
+                
             # Set pad token if available
             if hasattr(processor, "tokenizer") and hasattr(self.model, "generation_config"):
                 self.model.generation_config.pad_token_id = processor.tokenizer.pad_token_id
@@ -302,151 +303,62 @@ class VLMWrapper:
 
     def _preprocess_standard(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Any:
         """Unified preprocessing for all VLM models, including internvl and minicpm."""
-        # dispatch based on inference_type
-        if self.config.inference_type == "internvl":
-            return self._preprocess_internvl(conversation, image_input)
-        if self.config.inference_type == "minicpm":
-            return self._preprocess_minicpm(conversation, image_input)
+        # # dispatch based on inference_type
+        # if self.config.inference_type == "internvl":
+        #     return self._preprocess_internvl(conversation, image_input)
+        # if self.config.inference_type == "minicpm":
+        #     return self._preprocess_minicpm(conversation, image_input)
         # default for standard models
         batch_conversations, batch_images = self._normalize_inputs(conversation, image_input)
         try:
-            if self.model_type == "qwen":
-                return self._preprocess_qwen(batch_conversations, batch_images)
-            elif self.model_type == "gemma3":
-                return self._preprocess_gemma3(batch_conversations, batch_images)
-            elif self.model_type == "kimi":
-                return self._preprocess_kimi(batch_conversations, batch_images)
-            elif self.model_type == "mllama":
-                return self._preprocess_mllama(batch_conversations, batch_images)
-            elif self.model_type in ["llava", "llava_next"]:
-                return self._preprocess_llava(batch_conversations, batch_images)
-            elif self.model_type == "glm4v":
-                return self._preprocess_glm4v(batch_conversations, batch_images)
-            elif self.model_type in ["idefics", "smolvlm"]:
-                return self._preprocess_idefics_smolvlm(batch_conversations, batch_images)
-            else:
-                raise ValueError(f"Unsupported model type: {self.model_type}")
+            return self._preprocess(batch_conversations, batch_images)
+            # elif self.model_type == "kimi":
+            #     return self._preprocess_kimi(batch_conversations, batch_images)
+            # elif self.model_type == "glm4v":
+            #     return self._preprocess_glm4v(batch_conversations, batch_images)
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.model_type}: {e}", exc_info=True)
             raise
         
-        # Standard preprocessing methods (similar to original vlm_helpers.py)
-    def _preprocess_qwen(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Qwen models."""
+    def _preprocess(self, batch_conversations: List[List], batch_images: Optional[Union[Image.Image, List[Image.Image]]]) -> Dict[str, torch.Tensor]:
+        """Preprocess input data for the model.
+        Args:
+            batch_conversations: List of conversations, each a list of turns.
+            batch_images: List of images corresponding to each conversation.
+        Returns:
+            Dictionary of preprocessed inputs ready for model inference.
+        """
+
+        # Apply chat template to each conversation
         prompts = [
-            self.processor.apply_chat_template(conv, add_generation_prompt=True)
-            for conv in batch_conversations
+            self.processor.apply_chat_template(
+                conv, add_generation_prompt=True, tokenize=False
+            ) for conv in batch_conversations
         ]
-        image_inputs, _ = process_vision_info(batch_conversations)
-        inputs = self.processor(text=prompts, images=batch_images, padding=True, return_tensors="pt").to(self.device, dtype=self.dtype)
-        return inputs
-    
-
-    def _preprocess_mllama(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Mllama models."""
-        prompts = []
-        all_images = []
-        
-        for i, conv in enumerate(batch_conversations):
-            prompt = self.processor.apply_chat_template(conv, add_generation_prompt=True)
-            prompts.append(prompt)
-            
-            image_token_count = prompt.count('<|image|>')
-            
-            if batch_images and i < len(batch_images):
-                current_image = batch_images[i]
-                if image_token_count > 0:
-                    all_images.extend([current_image] * image_token_count)
-        
-        if all_images:
-            inputs = self.processor(
-                all_images, prompts, add_special_tokens=False,
-                return_tensors="pt", padding=True, truncation=True
-            )
-        else:
-            inputs = self.processor(
-                None, prompts, add_special_tokens=False,
-                return_tensors="pt", padding=True, truncation=True
-            )
-            
-        return {k: v.to(self.device) for k, v in inputs.items()}
-
-
-    def _preprocess_llava(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Llava models."""
-        prompts = [
-            self.processor.apply_chat_template(conv, add_generation_prompt=True)
-            for conv in batch_conversations
-        ]
-        inputs = self.processor(
-            images=batch_images, text=prompts,
-            return_tensors="pt", padding=True, truncation=True
-        )
-        return {k: v.to(self.device) for k, v in inputs.items()}
-
-
-    def _preprocess_idefics_smolvlm(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Idefics and SmolVLM models."""
-        if batch_images and not isinstance(batch_images, list):
+        # Ensure images are in list format
+        if batch_images is not None and not isinstance(batch_images, list):
             batch_images = [batch_images] * len(batch_conversations)
-        
-        processed_inputs = []
-        for i, conv in enumerate(batch_conversations):
-            try:
-                prompt = self.processor.apply_chat_template(conv, add_generation_prompt=True)
-                image_token_count = prompt.count('<image>')
-                
-                if batch_images and i < len(batch_images):
-                    current_image = batch_images[i]
-                    if image_token_count > 1:
-                        current_images = [current_image] * image_token_count
-                    else:
-                        current_images = [current_image] if image_token_count > 0 else None
-                else:
-                    current_images = None
-                
-                if current_images:
-                    inputs = self.processor(
-                        text=[prompt], 
-                        images=current_images,
-                        return_tensors="pt", 
-                        padding=True, 
-                        truncation=True
-                    )
-                else:
-                    inputs = self.processor(
-                        text=[prompt],
-                        return_tensors="pt", 
-                        padding=True, 
-                        truncation=True
-                    )
-                
-                processed_inputs.append(inputs)
-                
-            except Exception as e:
-                logger.error(f"Error preprocessing conversation {i}: {e}")
-                prompt = self.processor.apply_chat_template(conv, add_generation_prompt=True)
-                inputs = self.processor(
-                    text=[prompt],
-                    return_tensors="pt", 
-                    padding=True, 
-                    truncation=True
-                )
-                processed_inputs.append(inputs)
-        
-        if len(processed_inputs) == 1:
-            return {k: v.to(self.device) for k, v in processed_inputs[0].items()}
-        else:
-            batched_inputs = {}
-            for key in processed_inputs[0].keys():
-                try:
-                    batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs], dim=0)
-                except Exception as e:
-                    logger.warning(f"Could not batch {key}: {e}")
-                    batched_inputs[key] = processed_inputs[0][key]
             
-            return {k: v.to(self.device) for k, v in batched_inputs.items()}
+        if self.model_type in ["gemma3", "mllama"]:
+            # For Gemma3 and MLLama, we need to ensure images are wrapped in a list
+            images_to_process = [[img] for img in batch_images]
+        else:
+            images_to_process = batch_images
+            
+        assert len(prompts) == len(images_to_process), "Number of prompts must match number of image inputs"
         
+        # Preprocess inputs
+        inputs = self.processor(
+            text=prompts,
+            images=images_to_process,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        ).to(self.device, dtype=self.dtype)
+        
+        return inputs
+              
+          
     def _preprocess_glm4v(self, batch_conversations: List[List], batch_images: Optional[Union[Image.Image, List[Image.Image]]]) -> Dict[str, torch.Tensor]:
         """
         Preprocess for GLM-4V models using apply_chat_template.
@@ -521,29 +433,6 @@ class VLMWrapper:
             for key in processed_inputs_batch[0].keys():
                 batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs_batch], dim=0)
             return {k: v.to(self.device) for k, v in batched_inputs.items()}
-    
-    def _preprocess_gemma3(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        
-        prompts = [
-            self.processor.apply_chat_template(
-                conv,
-                add_generation_prompt=True,
-            ) for conv in batch_conversations
-        ]
-        
-        images_to_process = [[img] for img in batch_images] 
-        
-        assert len(prompts) == len(images_to_process), "Number of prompts must match number of image inputs"
-        
-        inputs = self.processor(
-            images=images_to_process,
-            text=prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True
-        ).to(self.device, dtype=self.dtype)
-        
-        return inputs
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
@@ -769,24 +658,15 @@ class VLMWrapper:
             List of decoded text strings.
         """
         try:
-            # Handle models with truly unique decoding logic first
-            if self.model_type == "minicpm":
-                # This model type seems to expect a list of characters, not token IDs
-                return ["".join(generated_ids)]
+            # # Handle models with truly unique decoding logic first
+            # if self.model_type == "minicpm":
+            #     # This model type seems to expect a list of characters, not token IDs
+            #     return ["".join(generated_ids)]
                 
-            if self.model_type == "internvl": 
-                # Per the original comment, this is likely a placeholder
-                logger.warning("decode() called for 'internvl', which might not be the intended path.")
-                return [str(generated_ids)]
-            
-            if self.model_type == "gemma3":
-                # Gemma 3 uses a different decoding method
-                decoded_text = [
-                    self.processor.decode(generated_id, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                    for generated_id in generated_ids
-                ]
-                
-                return decoded_text
+            # if self.model_type == "internvl": 
+            #     # Per the original comment, this is likely a placeholder
+            #     logger.warning("decode() called for 'internvl', which might not be the intended path.")
+            #     return [str(generated_ids)]
             
             return self.processor.batch_decode(
                 generated_ids, 
@@ -812,13 +692,29 @@ class VLMWrapper:
             Generated outputs (format depends on model type)
         """
         try:
-            if self.config.inference_type == "internvl":
-                return self._generate_internvl(inputs, **generation_kwargs)
-            elif self.config.inference_type == "minicpm":
-                return self._generate_minicpm(inputs, **generation_kwargs)
+            # if self.config.inference_type == "internvl":
+            #     return self._generate_internvl(inputs, **generation_kwargs)
+            # elif self.config.inference_type == "minicpm":
+            #     return self._generate_minicpm(inputs, **generation_kwargs)
+            # else:
+            generated_ids = self.model.generate(
+                **inputs,
+                **generation_kwargs)
+                
+            if inputs.get("input_ids") is not None and inputs["input_ids"].shape[1] > 0:
+                ids_to_decode = generated_ids[:, inputs["input_ids"].shape[1]:]
             else:
-                generated_ids = self.model.generate(**inputs, **generation_kwargs)
-                return generated_ids
+                ids_to_decode = generated_ids[inputs["input_ids"].shape[1]:]
+                
+            # logger.info(f"Generated IDs {generated_ids}")
+            
+            # logger.info(f"IDs to decode shape: {ids_to_decode.shape}")
+            # logger.info(f"IDs to decode: {ids_to_decode}")
+
+            
+            
+            return ids_to_decode
+        
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
