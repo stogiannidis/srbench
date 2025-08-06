@@ -298,6 +298,7 @@ class VLMWrapper:
     def preprocess(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Any:
         # Unified preprocessing for all inference types
         return self._preprocess_standard(conversation, image_input)
+    
 
     def _preprocess_standard(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Any:
         """Unified preprocessing for all VLM models, including internvl and minicpm."""
@@ -310,7 +311,7 @@ class VLMWrapper:
         batch_conversations, batch_images = self._normalize_inputs(conversation, image_input)
         try:
             if self.model_type == "qwen":
-                return self._preprocess_qwen(batch_conversations)
+                return self._preprocess_qwen(batch_conversations, batch_images)
             elif self.model_type == "gemma3":
                 return self._preprocess_gemma3(batch_conversations, batch_images)
             elif self.model_type == "kimi":
@@ -330,14 +331,14 @@ class VLMWrapper:
             raise
         
         # Standard preprocessing methods (similar to original vlm_helpers.py)
-    def _preprocess_qwen(self, batch_conversations: List[List]) -> Dict[str, torch.Tensor]:
+    def _preprocess_qwen(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Qwen models."""
         prompts = [
-            self.processor.apply_chat_template(conv, tokenize=False, add_generation_prompt=True)
+            self.processor.apply_chat_template(conv, add_generation_prompt=True)
             for conv in batch_conversations
         ]
         image_inputs, _ = process_vision_info(batch_conversations)
-        inputs = self.processor(text=prompts, images=image_inputs, padding=True, return_tensors="pt").to(self.device, dtype=self.dtype)
+        inputs = self.processor(text=prompts, images=batch_images, padding=True, return_tensors="pt").to(self.device, dtype=self.dtype)
         return inputs
     
 
@@ -530,15 +531,19 @@ class VLMWrapper:
             ) for conv in batch_conversations
         ]
         
+        images_to_process = [[img] for img in batch_images] 
+        
+        assert len(prompts) == len(images_to_process), "Number of prompts must match number of image inputs"
+        
         inputs = self.processor(
-            images=batch_images,
+            images=images_to_process,
             text=prompts,
             return_tensors="pt",
             padding=True,
             truncation=True
-        )
-            
-        return inputs.to(self.device, dtype=self.dtype)
+        ).to(self.device, dtype=self.dtype)
+        
+        return inputs
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
@@ -813,10 +818,6 @@ class VLMWrapper:
                 return self._generate_minicpm(inputs, **generation_kwargs)
             else:
                 generated_ids = self.model.generate(**inputs, **generation_kwargs)
-                
-                logger.info(f"Inputs: {inputs}, type: {type(inputs)}, length: {len(inputs)}")
-                logger.info(f"Generated IDs: {generated_ids}, type: {type(generated_ids)}, length: {len(generated_ids)}")
-                
                 return generated_ids
         except Exception as e:
             logger.error(f"Generation failed: {e}")

@@ -235,8 +235,6 @@ class EvaluationEngine:
             # Slice the generated id to keep only the generated text
             ids_to_decode = generated_ids[:, inputs["input_ids"].shape[1]:] if inputs["input_ids"].shape[1] > 0 else generated_ids
             
-            logger.info(f"Sliced IDs: {ids_to_decode}, type: {type(ids_to_decode)}")
-            
             output_texts = self.vlm.decode(ids_to_decode)
 
 
