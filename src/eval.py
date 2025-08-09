@@ -205,7 +205,7 @@ class EvaluationEngine:
             return results
             
         except Exception as e:
-            logger.error(f"Error processing batch {batch_idx + 1}: {e}")
+            logger.error(f"Error processing batch {batch_idx + 1}: {e}", exc_info=True)
             # Return empty results for failed batch
             return [{
                 "response": f"ERROR: {str(e)}",
@@ -411,7 +411,7 @@ class EvaluationEngine:
         elif self.one_shot_example:
             return "oneshot"
         else:
-            return "_test"
+            return "_baseline"
 
 
 def load_one_shot_example(json_path: str) -> Optional[Dict]:

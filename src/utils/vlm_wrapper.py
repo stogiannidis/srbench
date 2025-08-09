@@ -263,12 +263,20 @@ class VLMWrapper:
             
             # Configure padding
             if hasattr(processor, "tokenizer"):
+                # Ensure padding_side
                 processor.tokenizer.padding_side = self.config.padding_side
-                
-                
-            # Set pad token if available
+                # Ensure pad_token_id exists; fallback to eos if missing
+                if getattr(processor.tokenizer, "pad_token_id", None) is None:
+                    eos_id = getattr(processor.tokenizer, "eos_token_id", None)
+                    if eos_id is not None:
+                        processor.tokenizer.pad_token_id = eos_id
+            
+            # Set pad token on model generation config if available
             if hasattr(processor, "tokenizer") and hasattr(self.model, "generation_config"):
-                self.model.generation_config.pad_token_id = processor.tokenizer.pad_token_id
+                if getattr(self.model.generation_config, "pad_token_id", None) is None:
+                    self.model.generation_config.pad_token_id = processor.tokenizer.pad_token_id
+                else:
+                    self.model.generation_config.pad_token_id = processor.tokenizer.pad_token_id
                 
             return processor
             
@@ -301,21 +309,16 @@ class VLMWrapper:
         return self._preprocess_standard(conversation, image_input)
     
 
-    def _preprocess_standard(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Any:
+    def _preprocess_standard(self, batch_conversations: List, batch_images: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Any:
         """Unified preprocessing for all VLM models, including internvl and minicpm."""
-        # # dispatch based on inference_type
-        # if self.config.inference_type == "internvl":
-        #     return self._preprocess_internvl(conversation, image_input)
-        # if self.config.inference_type == "minicpm":
-        #     return self._preprocess_minicpm(conversation, image_input)
-        # default for standard models
-        batch_conversations, batch_images = self._normalize_inputs(conversation, image_input)
+        if self.config.inference_type == "internvl":
+            return self._preprocess_internvl(batch_conversations, batch_images)
+        if self.config.inference_type == "minicpm":
+            return self._preprocess_minicpm(batch_conversations, batch_images)
+        # batch_conversations, batch_images = self._normalize_inputs(conversation, image_input)
         try:
             return self._preprocess(batch_conversations, batch_images)
-            # elif self.model_type == "kimi":
-            #     return self._preprocess_kimi(batch_conversations, batch_images)
-            # elif self.model_type == "glm4v":
-            #     return self._preprocess_glm4v(batch_conversations, batch_images)
+    
         except Exception as e:
             logger.error(f"Preprocessing failed for {self.model_type}: {e}", exc_info=True)
             raise
@@ -332,15 +335,16 @@ class VLMWrapper:
         # Apply chat template to each conversation
         prompts = [
             self.processor.apply_chat_template(
-                conv, add_generation_prompt=True, tokenize=False
-            ) for conv in batch_conversations
+                conv, 
+                add_generation_prompt=True,
+                tokenize=False
+            ) 
+            for conv in batch_conversations
         ]
-        # Ensure images are in list format
-        if batch_images is not None and not isinstance(batch_images, list):
-            batch_images = [batch_images] * len(batch_conversations)
+            
             
         if self.model_type in ["gemma3", "mllama"]:
-            # For Gemma3 and MLLama, we need to ensure images are wrapped in a list
+            # For Gemma3, we need to ensure images are wrapped in a list
             images_to_process = [[img] for img in batch_images]
         else:
             images_to_process = batch_images
@@ -353,36 +357,12 @@ class VLMWrapper:
             images=images_to_process,
             return_tensors="pt",
             padding=True,
-            truncation=True
-        ).to(self.device, dtype=self.dtype)
+        ).to(self.device)
         
+    
         return inputs
               
-          
-    def _preprocess_glm4v(self, batch_conversations: List[List], batch_images: Optional[Union[Image.Image, List[Image.Image]]]) -> Dict[str, torch.Tensor]:
-        """
-        Preprocess for GLM-4V models using apply_chat_template.
-        This method relies on a recent version of transformers that can handle
-        image data (e.g., URLs) directly within the chat template.
-        """
-        prompts = [
-            self.processor.apply_chat_template(
-                conv,
-                tokenize=True,
-                add_generation_prompt=True
-            )
-            for conv in batch_conversations
-        ]
-        
-        inputs = self.processor(
-            text=prompts,
-            images=images,
-            return_tensors="pt",
-            padding=True,
-            truncation=True
-        ).to(self.device, dtype=self.dtype)
-        
-        return inputs
+
     
     def _preprocess_kimi(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
         """Preprocess for Kimi models."""
@@ -436,81 +416,97 @@ class VLMWrapper:
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
-        A more robust preprocessing function for InternVL models.
-
-        It handles single or batch conversations, safely parses content, and ensures
-        correct dtype conversion based on the model's configuration.
+        Robust preprocessing for InternVL models.
+        - Supports batch or single conversations
+        - Extracts the last user turn to avoid mixing one-shot examples
+        - Builds a per-sample list of pixel tensors (later concatenated for batch_chat)
+        - Ensures input dtype matches model parameters
         """
-        # 1. Simplify batch handling: always work with a list of conversations
+        # Normalize to list of conversations
         conversation_list = conversation if isinstance(conversation[0], list) else [conversation]
-
-        questions = []
-        all_pixel_values = []
-        num_patches_list = []
-
-        # 2. Robustly parse each conversation
+        
+        questions: List[str] = []
+        pixel_values_list: List[torch.Tensor] = []
+        num_patches_list: List[int] = []
+        
+        # Determine model param dtype to avoid dtype mismatch (e.g., bf16 vs fp16)
+        try:
+            model_param_dtype = next(self.model.parameters()).dtype
+        except Exception:
+            model_param_dtype = self.dtype
+        
         for conv in conversation_list:
-            # Safely find the image and text, ignoring their order
+            # Find last user turn
+            user_turns = [turn for turn in conv if isinstance(turn, dict) and turn.get("role") == "user"]
+            if not user_turns:
+                raise ValueError("No user turn found in conversation for InternVL")
+            last_user = user_turns[-1]
+            
+            # Extract image and text
             image = None
-            text_parts = []
-            for item in conv[0]['content']:
-                if 'image' in item:
+            text_parts: List[str] = []
+            for item in last_user.get('content', []):
+                if isinstance(item, dict) and 'image' in item and image is None:
                     image = item['image']
-                elif 'text' in item:
+                elif isinstance(item, dict) and 'text' in item:
                     text_parts.append(item['text'])
             
+            if image is None and image_input is not None:
+                # Fallback if image not embedded
+                image = image_input[0] if isinstance(image_input, list) and image_input else image_input
             if image is None:
-                raise ValueError("No image found in conversation content.")
-
+                raise ValueError("No image found in conversation content for InternVL")
+            
             question = " ".join(text_parts).strip()
             questions.append(question)
             
-            # Process the image
-            pixel_values = self._load_image_internvl(image, max_num=12)
-            all_pixel_values.append(pixel_values)
-            num_patches_list.append(pixel_values.size(0))
-
-        # Concatenate all pixel values into a single tensor
-        if all_pixel_values:
-            pixel_values_tensor = torch.cat(all_pixel_values, dim=0)
-        else:
-            # Create an empty tensor with the correct number of dimensions
-            pixel_values_tensor = torch.empty(0, 3, 448, 448) 
-
-        # 3. Correctly move to device with the model's dtype
-        # This prevents dtype mismatches regardless of the device (CPU, CUDA, MPS)
-        model_dtype = self.model.dtype if hasattr(self, 'model') else torch.bfloat16
-        pixel_values_tensor = pixel_values_tensor.to(device=self.device, dtype=model_dtype)
-
+            # Load and preprocess image into patches (N, 3, 448, 448)
+            patches = self._load_image_internvl(image, max_num=12)
+            # Match dtype/device to model parameters to avoid conv2d dtype mismatch
+            patches = patches.to(device=self.device, dtype=model_param_dtype)
+            pixel_values_list.append(patches)
+            num_patches_list.append(patches.size(0))
+        
         return {
-            "pixel_values": pixel_values_tensor,
+            "pixel_values": pixel_values_list,  # keep per-sample; we will concat at generation
             "questions": questions,
             "num_patches_list": num_patches_list,
-        
         }
 
     def _preprocess_minicpm(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Tuple:
-        """Preprocessing for MiniCPM models."""
-        if isinstance(conversation[0], list):
-            # Batch format
-            msgs_batch = []
-            for conv in conversation:
-                # Convert to MiniCPM format
-                question = conv[0]["content"][1]["text"]
-                image = conv[0]["content"][0]["image"]
-                
-                # Prepare image as numpy array
-                np_img = self._prepare_image_minicpm(image)
-                msgs = [{"role": "user", "content": [np_img, question]}]
-                msgs_batch.append(msgs)
-            return msgs_batch
-        else:
-            # Single conversation
-            question = conversation[0]["content"][1]["text"]
-            image = conversation[0]["content"][0]["image"]
-            np_img = self._prepare_image_minicpm(image)
-            msgs = [{"role": "user", "content": [np_img, question]}]
-            return msgs
+        """Preprocessing for MiniCPM models. Extract the last user turn, then find image/text by keys."""
+        # Normalize to list of conversations
+        conv_list = conversation if isinstance(conversation[0], list) else [conversation]
+        msgs_batch: List[List[Dict[str, Any]]] = []
+        for conv in conv_list:
+            # Find last user turn (to avoid one-shot example turns)
+            user_turns = [turn for turn in conv if isinstance(turn, dict) and turn.get("role") == "user"]
+            if not user_turns:
+                raise ValueError("No user turn found in conversation")
+            last_user = user_turns[-1]
+            # Extract image and text from the content list, regardless of order
+            img = None
+            text = ""
+            for item in last_user.get("content", []):
+                if isinstance(item, dict) and "image" in item and img is None:
+                    img = item["image"]
+                elif isinstance(item, dict) and "text" in item and not text:
+                    text = item["text"]
+            # Fallback to image_input if not embedded in conversation
+            if img is None and image_input is not None:
+                if isinstance(image_input, list) and len(image_input) > 0:
+                    img = image_input[0]
+                else:
+                    img = image_input
+            if img is None:
+                # Mirror the KeyError seen in logs for clarity
+                raise KeyError("image")
+            # Prepare image and build msgs
+            np_img = self._prepare_image_minicpm(img)
+            msgs = [{"role": "user", "content": [np_img, text]}]
+            msgs_batch.append(msgs)
+        # Return batch or single
+        return msgs_batch if len(msgs_batch) > 1 else msgs_batch[0]
 
     def _load_image_internvl(self, image_input: Any, input_size: int = 448, max_num: int = 12) -> torch.Tensor:
         """Load and preprocess image for InternVL with dynamic preprocessing."""
@@ -626,52 +622,26 @@ class VLMWrapper:
                 
         return best_ratio
 
-    def _normalize_inputs(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]]) -> Tuple[List[List], Optional[List[Image.Image]]]:
-        """Normalize conversation and image inputs to batch format."""
-        # Normalize conversation
-        if conversation and isinstance(conversation[0], list):
-            batch_conversations = conversation
-        else:
-            batch_conversations = [conversation]
-
-        # Normalize images
-        batch_images = None
-        if image_input is not None:
-            if isinstance(image_input, list) and hasattr(image_input[0], "format"):
-                batch_images = image_input
-            else:
-                batch_images = [image_input] * len(batch_conversations)
-
-        return batch_conversations, batch_images
 
 
-    def decode(self, generated_ids: torch.Tensor) -> List[str]:
+    def decode(self, generated_ids: Any) -> List[str]:
         """
-        Decode generated token IDs to text.
-        Assumes that any necessary slicing of the input tensor (e.g., removing input prompt tokens)
-        has been performed before calling this function.
-        
-        Args:
-            generated_ids: Generated token IDs from the model.
-            
-        Returns:
-            List of decoded text strings.
+        Decode generated outputs.
+        - For standard models: decode token IDs to text (slice per-sample new tokens using prompt lengths).
+        - For internvl/minicpm: pass through strings/lists.
         """
         try:
-            # # Handle models with truly unique decoding logic first
-            # if self.model_type == "minicpm":
-            #     # This model type seems to expect a list of characters, not token IDs
-            #     return ["".join(generated_ids)]
-                
-            # if self.model_type == "internvl": 
-            #     # Per the original comment, this is likely a placeholder
-            #     logger.warning("decode() called for 'internvl', which might not be the intended path.")
-            #     return [str(generated_ids)]
+            # Pass-through for models that already return strings
+            if self.config.inference_type in ("internvl", "minicpm"):
+                if isinstance(generated_ids, list):
+                    return generated_ids
+                if isinstance(generated_ids, str):
+                    return [generated_ids]
+                return [str(generated_ids)]
             
             return self.processor.batch_decode(
                 generated_ids, 
                 skip_special_tokens=True, 
-                clean_up_tokenization_spaces=False
             )
             
         except Exception as e:
@@ -692,55 +662,80 @@ class VLMWrapper:
             Generated outputs (format depends on model type)
         """
         try:
-            # if self.config.inference_type == "internvl":
-            #     return self._generate_internvl(inputs, **generation_kwargs)
-            # elif self.config.inference_type == "minicpm":
-            #     return self._generate_minicpm(inputs, **generation_kwargs)
-            # else:
-            generated_ids = self.model.generate(
-                **inputs,
-                **generation_kwargs)
-                
-            if inputs.get("input_ids") is not None and inputs["input_ids"].shape[1] > 0:
-                ids_to_decode = generated_ids[:, inputs["input_ids"].shape[1]:]
+            if self.config.inference_type == "internvl":
+                return self._generate_internvl(inputs, **generation_kwargs)
+            elif self.config.inference_type == "minicpm":
+                return self._generate_minicpm(inputs, **generation_kwargs)
             else:
-                ids_to_decode = generated_ids[inputs["input_ids"].shape[1]:]
-                
-            # logger.info(f"Generated IDs {generated_ids}")
+                sequences = self.model.generate(
+                    **inputs,
+                    **generation_kwargs
+                )
             
-            # logger.info(f"IDs to decode shape: {ids_to_decode.shape}")
-            # logger.info(f"IDs to decode: {ids_to_decode}")
-
+            # Slice prompt tokens from generated sequences
+            prompt_length = inputs["input_ids"].shape[-1]
+            if sequences.dim() == 1:
+                generated_ids = sequences[prompt_length:]
+            else:
+                generated_ids = sequences[:, prompt_length:]
             
-            
-            return ids_to_decode
+            return generated_ids
         
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
         
     def _generate_internvl(self, inputs: Dict[str, Any], **generation_kwargs) -> List[str]:
-        """Generate using InternVL's batch_chat interface."""
-        pixel_values = inputs["pixel_values"]
+        """Generate using InternVL's chat API per-sample to avoid batch misalignment issues."""
+        pixel_values_in = inputs["pixel_values"]
         questions = inputs["questions"]
         num_patches_list = inputs["num_patches_list"]
-                
+        
+        # Build per-sample pixel tensors list
+        if isinstance(pixel_values_in, list):
+            pv_list = pixel_values_in
+        else:
+            # Split concatenated tensor by patch counts
+            pv_list = list(torch.split(pixel_values_in, num_patches_list, dim=0))
+        
+        if len(pv_list) != len(questions):
+            raise ValueError(
+                f"InternVL mismatch: {len(pv_list)} pixel groups vs {len(questions)} questions"
+            )
+        
         # Default generation config
         generation_config = {
-            "max_new_tokens": 128,
+            "max_new_tokens": t,
             "do_sample": False,
-            "pad_token_id": self.processor.pad_token_id,
+            "pad_token_id": getattr(self.processor, 'pad_token_id', None),
+            "eos_token_id": getattr(self.processor, 'eos_token_id', getattr(self.model.generation_config, 'eos_token_id', None)),
         }
         generation_config.update(generation_kwargs)
         
-        responses = self.model.batch_chat(
-            self.processor,
-            pixel_values,
-            num_patches_list=num_patches_list,
-            questions=questions,
-            generation_config=generation_config,
-        )
-    
+        responses: List[str] = []
+        for pv, q, n in zip(pv_list, questions, num_patches_list):
+            # Sanity checks
+            if pv.dim() != 4 or pv.size(0) != int(n):
+                raise ValueError(
+                    f"InternVL per-sample mismatch: pixel batch={pv.size(0)} vs n={n}, shape={tuple(pv.shape)}"
+                )
+            out = self.model.batch_chat(
+                self.processor,
+                pv,
+                num_patches_list=[int(n)],
+                questions=[q],
+                generation_config=generation_config,
+            )
+            # Normalize to string
+            if isinstance(out, list):
+                if len(out) == 1 and isinstance(out[0], dict) and 'response' in out[0]:
+                    responses.append(out[0]['response'])
+                elif len(out) == 1 and isinstance(out[0], str):
+                    responses.append(out[0])
+                else:
+                    responses.append(str(out))
+            else:
+                responses.append(str(out))
         return responses
 
     def _generate_minicpm(self, msgs: Any, **generation_kwargs) -> List[str]:
