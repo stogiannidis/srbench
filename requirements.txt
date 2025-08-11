@@ -98,10 +98,9 @@ timm==1.0.14
 tokenizers==0.21.0
 torchvision==0.21.0
 tqdm==4.67.1
-transformers==4.54.1
+transformers==4.55.0
 triton==3.2.0
 tzdata==2025.1
-wandb==0.19.5
 xxhash==3.5.0
 yarl==1.18.3
 hf-xet==1.1.5

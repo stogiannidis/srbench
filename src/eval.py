@@ -111,12 +111,25 @@ class EvaluationEngine:
                 "dtype": str(self.vlm.dtype),
             })
     
-    def _prepare_messages(self, questions: List[str], images: List[Any]) -> List[List[Dict]]:
+    def _prepare_messages(self, questions: List[str], images: List[Image]) -> List[List[Dict]]:
         """Prepare messages in the required format with optional CoT and one-shot examples."""
         messages = []
         
         for question, image in zip(questions, images):
             conversation = []
+            
+            # Add system message with model and strategy info
+            system_message = {
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": ("You are a spatial reasoning AI assistant specialized in analyzing, "
+                            "understanding, and solving problems involving spatial relationships, "
+                            "geometric transformations, and visual-spatial concepts."
+                            )
+                }]
+            }
+            conversation.append(system_message)
             
             # Add one-shot example if provided
             if self.one_shot_example:
@@ -167,45 +180,6 @@ class EvaluationEngine:
         
         return cot_prompt
     
-    def _trim_response(self, response: str, original_question: str) -> str:
-        """
-        Remove the original prompt/question from the response if it appears.
-        
-        Args:
-            response: The full model response
-            original_question: The original question to remove
-            
-        Returns:
-            Cleaned response without the original prompt
-        """
-        if not isinstance(response, str):
-            response = str(response)
-        
-        response = response.strip()
-        
-        # Remove common prefixes that models might add
-        prefixes_to_remove = [
-            "Answer:", "Response:", "The answer is:", "A:", "Question:", "Q:",
-            "Based on the image,", "Looking at the image,", "In the image,",
-            "I can see", "This image shows", "The image depicts",
-        ]
-        
-        for prefix in prefixes_to_remove:
-            if response.lower().startswith(prefix.lower()):
-                response = response[len(prefix):].strip()
-        
-        # Remove the original question if it appears at the beginning
-        question_clean = original_question.strip().lower()
-        response_clean = response.lower()
-        
-        if response_clean.startswith(question_clean):
-            response = response[len(original_question):].strip()
-        
-        # Remove any leading colons or spaces
-        response = response.lstrip(": \n\t")
-        
-        return response
-    
     def _process_batch(self, batch: Dict[str, List], batch_idx: int, total_batches: int) -> List[Dict[str, str]]:
         """
         Process a single batch of examples with unified interface.
@@ -231,7 +205,7 @@ class EvaluationEngine:
             return results
             
         except Exception as e:
-            logger.error(f"Error processing batch {batch_idx + 1}: {e}")
+            logger.error(f"Error processing batch {batch_idx + 1}: {e}", exc_info=True)
             # Return empty results for failed batch
             return [{
                 "response": f"ERROR: {str(e)}",
@@ -246,59 +220,26 @@ class EvaluationEngine:
         """Process batch for standard VLM models."""
         results = []
         
-        try:
-            with self.vlm.memory_efficient_mode():
-                # Preprocess the entire batch
-                inputs = self.vlm.preprocess(conversation=messages, image_input=batch["image"])
-                
-                # Generate responses for the batch
-                with torch.autocast('cuda', enabled=torch.cuda.is_available()):
-                    generated_ids = self.vlm.generate(
-                        inputs,
-                        max_new_tokens=512,
-                        do_sample=False,
-                        pad_token_id=getattr(self.vlm.processor.tokenizer, 'eos_token_id', None) if hasattr(self.vlm.processor, 'tokenizer') else None,
-                    )
-                
-                # Calculate input length for proper decoding
-                input_length = inputs.get("input_ids", torch.tensor([])).shape[-1] if isinstance(inputs, dict) and "input_ids" in inputs else 0
-                
-                # Decode responses
-                if self.vlm.model_type == "molmo":
-                    output_texts = self.vlm.decode(generated_ids, extra=input_length)
-                else:
-                    # For most models, we need to trim the input tokens
-                    if hasattr(generated_ids, 'shape') and len(generated_ids.shape) > 1:
-                        if self.vlm.model_type not in ["minicpm"]:
-                            generated_ids = generated_ids[:, input_length:]
-                    output_texts = self.vlm.decode(generated_ids)
-                
-                # Clean up GPU memory
-                del inputs, generated_ids
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        with self.vlm.memory_efficient_mode():
+            # Preprocess the entire batch
+            inputs = self.vlm.preprocess(conversation=messages, image_input=batch["image"])
+            
 
-                # Process results for each example in the batch
-                for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
-                    cleaned_response = self._trim_response(raw_prediction, question)
-                    results.append({
-                        "response": cleaned_response,
-                        "answer": ground_truth,
-                        "question": question,
-                        "raw_response": raw_prediction,
-                        "batch_idx": batch_idx,
-                        "example_idx": idx,
-                    })
+            generated_ids = self.vlm.generate(
+                inputs,
+                max_new_tokens=1024,
+                do_sample=False
+            )
+            
+            output_texts = self.vlm.decode(generated_ids)
 
-        except Exception as e:
-            logger.error(f"Error processing batch {batch_idx + 1}: {e}")
-            # Return error results for the entire batch
-            for idx, (question, answer) in enumerate(zip(batch["question"], batch["answer"])):
+
+            # Process results for each example in the batch
+            for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
                 results.append({
-                    "response": f"ERROR: {str(e)}",
-                    "answer": answer,
                     "question": question,
-                    "raw_response": f"ERROR: {str(e)}",
+                    "response": raw_prediction,
+                    "gold answer": ground_truth,
                     "batch_idx": batch_idx,
                     "example_idx": idx,
                 })
@@ -319,14 +260,6 @@ class EvaluationEngine:
         Returns:
             Path to the saved results CSV file
         """
-        logger.info(f"Starting reproducible evaluation on dataset: {dataset_id}")
-        logger.info(f"Sampling strategy: {sample_strategy}, Max samples: {max_samples}")
-        
-        if self.use_cot:
-            logger.info("Chain-of-Thought prompting enabled")
-        if self.one_shot_example:
-            logger.info("One-shot example provided")
-        
         # Load model lazily
         self._load_model()
         
@@ -364,11 +297,7 @@ class EvaluationEngine:
         # Process dataset in batches
         all_results = []
         total_batches = (len(data) + batch_size - 1) // batch_size
-        
-        # Adjust batch size for special model types
-        if self.vlm.config.inference_type in ["internvl", "minicpm"]:
-            # These models can handle larger batches more efficiently
-            batch_size = min(batch_size, 8)  # Cap at 8 for memory safety
+    
         
         with tqdm(total=total_batches, desc="Processing batches", colour="green") as pbar:
             for i in range(0, len(data), batch_size):
@@ -482,18 +411,7 @@ class EvaluationEngine:
         elif self.one_shot_example:
             return "oneshot"
         else:
-            return "baseline"
-
-    def _get_strategy_description(self) -> str:
-        """Get human-readable description of prompting strategy."""
-        if self.use_cot and self.one_shot_example:
-            return "Chain-of-Thought + One-shot Example"
-        elif self.use_cot:
-            return "Chain-of-Thought"
-        elif self.one_shot_example:
-            return "One-shot Example"
-        else:
-            return "Baseline (No special prompting)"
+            return "_baseline"
 
 
 def load_one_shot_example(json_path: str) -> Optional[Dict]:
