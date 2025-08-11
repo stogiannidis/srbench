@@ -100,7 +100,7 @@ class EvaluationEngine:
         """Load the VLM model lazily to save memory."""
         if self.vlm is None:
             logger.info(f"Loading model: {self.model_id}")
-            self.vlm = VLMWrapper(self.model_id, self.device_map)
+            self.vlm = VLMWrapper(self.model_id, self.device_map, dtype=torch.bfloat16)
             logger.info("Model loaded successfully")
             
             # Add model-specific metadata
@@ -537,6 +537,14 @@ def parse_args():
 
 def main():
     """Main function with comprehensive error handling."""
+    
+    # print gpu info
+    if torch.cuda.is_available():
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
+    else:
+        print("No GPU available, using CPU")
+    
     args = parse_args()
     
     if args.verbose:
