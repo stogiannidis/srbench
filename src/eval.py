@@ -173,9 +173,9 @@ class EvaluationEngine:
             return question.strip()
         
         cot_prompt = (
-            "Please think step by step and explain your reasoning before providing the final answer.\n\n"
-            f"{question.strip()}\n\n"
-            "Let me think through this step by step:"
+            "Please think step by step and explain your reasoning before providing answering the question.\n"
+            "Provide the final answer at the end of your reasoning in curly bracket, e.g., {A} or {yes}.\n\n"
+            f"Question: {question.strip()}\n\n"
         )
         
         return cot_prompt
@@ -312,11 +312,10 @@ class EvaluationEngine:
                     "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
                 })
                 
-                # Periodic garbage collection
-                if (i // batch_size) % 10 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+        
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         # Save results with metadata
         output_path = self._save_results_with_metadata(all_results, dataset_id)
@@ -407,11 +406,11 @@ class EvaluationEngine:
         if self.use_cot and self.one_shot_example:
             return "cot_oneshot"
         elif self.use_cot:
-            return "cot"
+            return "cot_test"
         elif self.one_shot_example:
             return "oneshot"
         else:
-            return "_baseline"
+            return "_normal"
 
 
 def load_one_shot_example(json_path: str) -> Optional[Dict]:

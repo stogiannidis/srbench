@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def parse_arguments():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Clean CSV response columns in a directory")
-    parser.add_argument("input_directory", help="Directory containing CSV files")
+    parser.add_argument("--input_directory", help="Directory containing CSV files")
     parser.add_argument("--response-column", default="raw_response", help="Response column name (default: response)")
     parser.add_argument("--choices", nargs="+", default=["A", "B", "C", "D", "E"], help="Valid choices")
     parser.add_argument("--no-few-shot", action="store_true", help="Disable few-shot examples")

@@ -20,6 +20,7 @@ from transformers import (
     AutoModelForCausalLM,
     GenerationConfig,
     AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     MllamaForConditionalGeneration,
     AutoModel,
     AutoTokenizer,
@@ -82,13 +83,13 @@ MODEL_CONFIGS = {
         processor_args={"use_fast": True}
     ),
     "idefics": ModelConfig(
-        model_class=AutoModelForVision2Seq,
+        model_class=AutoModelForImageTextToText,
         processor_class=AutoProcessor,
         supports_flash_attention=True,
         processor_args={"use_fast": True}
     ),
     "smolvlm": ModelConfig(
-        model_class=AutoModelForVision2Seq,
+        model_class=AutoModelForImageTextToText,
         processor_class=AutoProcessor,
         supports_flash_attention=True,
         special_args={},
@@ -338,17 +339,15 @@ class VLMWrapper:
                 conv, 
                 add_generation_prompt=True,
                 tokenize=False
-            ) 
+            )
             for conv in batch_conversations
         ]
-            
-            
-        if self.model_type in ["gemma3", "mllama"]:
-            # For Gemma3, we need to ensure images are wrapped in a list
+
+        if self.model_type in ["mllama", "smolvlm", "idefics", "gemma3", "glm4v"]:           
             images_to_process = [[img] for img in batch_images]
         else:
-            images_to_process = batch_images
-            
+            images_to_process = batch_images 
+        
         assert len(prompts) == len(images_to_process), "Number of prompts must match number of image inputs"
         
         # Preprocess inputs
@@ -357,62 +356,11 @@ class VLMWrapper:
             images=images_to_process,
             return_tensors="pt",
             padding=True,
-        ).to(self.device)
+        ).to(self.device, dtype=self.dtype)
         
     
         return inputs
               
-
-    
-    def _preprocess_kimi(self, batch_conversations: List[List], batch_images: List[Image.Image]) -> Dict[str, torch.Tensor]:
-        """Preprocess for Kimi models."""
-        
-        # Kimi's processor can handle multiple images per conversation
-        # This implementation assumes that if multiple images are provided,
-        # they all belong to the single conversation in the batch.
-        if len(batch_conversations) > 1 and len(batch_images) > 1:
-            logger.warning("Kimi wrapper handles multiple images for a single conversation, not for a batch of conversations. Processing one image per conversation.")
-            images_to_process = [[img] for img in batch_images]
-        else:
-            images_to_process = [batch_images] * len(batch_conversations)
-
-        processed_inputs_batch = []
-        for i, conv in enumerate(batch_conversations):
-            current_images = images_to_process[i]
-            
-            # 1. Construct the 'messages' list for the chat template
-            messages = []
-            for turn in conv:
-                content_list = []
-                # Kimi expects image content first
-                if current_images:
-                    content_list.extend([{"type": "image"}] * len(current_images))
-                
-                text_content = " ".join([item['text'] for item in turn['content'] if 'text' in item])
-                content_list.append({"type": "text", "text": text_content})
-                
-                messages.append({"role": turn['role'], "content": content_list})
-
-            # 2. First processing step: apply chat template
-            # Note: The Kimi processor expects the tokenized output as input for the next step
-            text_inputs = self.processor.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt"
-            )
-
-            # 3. Second processing step: combine images and tokenized text
-            final_inputs = self.processor(
-                images=current_images, text=text_inputs, return_tensors="pt", padding=True, truncation=True
-            )
-            processed_inputs_batch.append(final_inputs)
-
-        # 4. Batch the results from each conversation
-        if len(processed_inputs_batch) == 1:
-            return {k: v.to(self.device) for k, v in processed_inputs_batch[0].items()}
-        else:
-            batched_inputs = {}
-            for key in processed_inputs_batch[0].keys():
-                batched_inputs[key] = torch.cat([inp[key] for inp in processed_inputs_batch], dim=0)
-            return {k: v.to(self.device) for k, v in batched_inputs.items()}
 
     def _preprocess_internvl(self, conversation: List, image_input: Optional[Union[Image.Image, List[Image.Image]]] = None) -> Dict[str, Any]:
         """
@@ -641,7 +589,8 @@ class VLMWrapper:
             
             return self.processor.batch_decode(
                 generated_ids, 
-                skip_special_tokens=True, 
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True 
             )
             
         except Exception as e:
@@ -703,15 +652,6 @@ class VLMWrapper:
                 f"InternVL mismatch: {len(pv_list)} pixel groups vs {len(questions)} questions"
             )
         
-        # Default generation config
-        generation_config = {
-            "max_new_tokens": t,
-            "do_sample": False,
-            "pad_token_id": getattr(self.processor, 'pad_token_id', None),
-            "eos_token_id": getattr(self.processor, 'eos_token_id', getattr(self.model.generation_config, 'eos_token_id', None)),
-        }
-        generation_config.update(generation_kwargs)
-        
         responses: List[str] = []
         for pv, q, n in zip(pv_list, questions, num_patches_list):
             # Sanity checks
@@ -724,7 +664,7 @@ class VLMWrapper:
                 pv,
                 num_patches_list=[int(n)],
                 questions=[q],
-                generation_config=generation_config,
+                generation_config=generation_kwargs,
             )
             # Normalize to string
             if isinstance(out, list):
