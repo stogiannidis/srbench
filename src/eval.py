@@ -100,7 +100,7 @@ class EvaluationEngine:
         """Load the VLM model lazily to save memory."""
         if self.vlm is None:
             logger.info(f"Loading model: {self.model_id}")
-            self.vlm = VLMWrapper(self.model_id, self.device_map)
+            self.vlm = VLMWrapper(self.model_id, self.device_map, dtype=torch.bfloat16)
             logger.info("Model loaded successfully")
             
             # Add model-specific metadata
@@ -173,9 +173,9 @@ class EvaluationEngine:
             return question.strip()
         
         cot_prompt = (
-            "Please think step by step and explain your reasoning before providing the final answer.\n\n"
-            f"{question.strip()}\n\n"
-            "Let me think through this step by step:"
+            "Please think step by step and explain your reasoning before providing answering the question.\n"
+            "Provide the final answer at the end of your reasoning in curly bracket, e.g., {A} or {yes}.\n\n"
+            f"Question: {question.strip()}\n\n"
         )
         
         return cot_prompt
@@ -227,12 +227,13 @@ class EvaluationEngine:
 
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=1024,
+                max_new_tokens=512,
                 do_sample=False
             )
             
             output_texts = self.vlm.decode(generated_ids)
 
+            del inputs, generated_ids  # Free memory
 
             # Process results for each example in the batch
             for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
@@ -312,11 +313,10 @@ class EvaluationEngine:
                     "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
                 })
                 
-                # Periodic garbage collection
-                if (i // batch_size) % 10 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+        
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         # Save results with metadata
         output_path = self._save_results_with_metadata(all_results, dataset_id)
@@ -407,11 +407,11 @@ class EvaluationEngine:
         if self.use_cot and self.one_shot_example:
             return "cot_oneshot"
         elif self.use_cot:
-            return "cot"
+            return "cot_test"
         elif self.one_shot_example:
             return "oneshot"
         else:
-            return "_baseline"
+            return "_normal"
 
 
 def load_one_shot_example(json_path: str) -> Optional[Dict]:
@@ -537,6 +537,14 @@ def parse_args():
 
 def main():
     """Main function with comprehensive error handling."""
+    
+    # print gpu info
+    if torch.cuda.is_available():
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
+    else:
+        print("No GPU available, using CPU")
+    
     args = parse_args()
     
     if args.verbose:
