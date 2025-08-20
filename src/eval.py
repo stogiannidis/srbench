@@ -227,12 +227,13 @@ class EvaluationEngine:
 
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=1024,
+                max_new_tokens=512,
                 do_sample=False
             )
             
             output_texts = self.vlm.decode(generated_ids)
 
+            del inputs, generated_ids  # Free memory
 
             # Process results for each example in the batch
             for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
