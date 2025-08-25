@@ -227,7 +227,7 @@ class EvaluationEngine:
 
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=512,
+                max_new_tokens=1024,
                 do_sample=False
             )
             
