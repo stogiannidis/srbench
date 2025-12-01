@@ -160,7 +160,7 @@ def main():
     model_name = model.split("/")[-1]
 
     # Load the specified dataset
-    dataset = load_dataset(dataset_name, split="train")
+    dataset = load_dataset(dataset_name, split="test")
 
     all_responses = []
 
