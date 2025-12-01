@@ -10,7 +10,7 @@ from typing import List
 import dotenv
 import pandas as pd
 from datasets import load_dataset
-from openai import AzureOpenAI
+from openai import OpenAI
 from PIL import Image
 from tqdm import tqdm
 
@@ -73,7 +73,7 @@ def image_to_base64(image: Image.Image) -> str:
 @retry_with_exponential_backoff()
 def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str]:
     """
-    Infer responses using Azure OpenAI from provided prompts and images.
+    Infer responses using OpenRouter from provided prompts and images.
 
     Args:
         prompts (List[str]): A list of prompts/questions.
@@ -83,21 +83,14 @@ def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str
     Returns:
         List[str]: A list of responses from the model.
     """
-    if not os.getenv("AZURE_OPENAI_API_KEY") or not os.getenv("AZURE_OPENAI_ENDPOINT"):
+    if not os.getenv("OPENROUTER_API_KEY"):
         raise EnvironmentError(
-            "Azure OpenAI API key or endpoint not set in environment variables."
+            "OpenRouter API key not set in environment variables."
         )
 
-    endpoint = (
-        os.getenv("AZURE_OPENAI_ENDPOINT")
-        if model == "gpt-4o"
-        else os.getenv("O1_ENDPOINT")
-    )
-
-    client = AzureOpenAI(
-        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        api_version="2024-07-01-preview",
-        azure_endpoint=endpoint,
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
     )
 
     contents = []
@@ -140,7 +133,7 @@ def main():
     provided command-line arguments for dataset name and model.
     """
     parser = argparse.ArgumentParser(
-        description="Process dataset and perform inference using Azure OpenAI."
+        description="Process dataset and perform inference using OpenRouter."
     )
     parser.add_argument(
         "--dataset",
@@ -149,7 +142,11 @@ def main():
         help="Dataset name in Hugging Face format (e.g., stogian/mrt_pf_mix)",
     )
     parser.add_argument(
-        "--model", type=str, required=True, help="Model name (e.g., gpt-4o)"
+        "--model",
+        type=str,
+        required=True,
+        help="Model name (e.g., gpt-4o)",
+        default="x-ai/grok-4.1-fast:free",
     )
     parser.add_argument(
         "--batch_size", type=int, default=16, help="Batch size for processing abstracts"
