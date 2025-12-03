@@ -114,6 +114,14 @@ MODEL_CONFIGS = {
         supports_flash_attention=True,
         inference_type="internvl"
     ),
+    "internvl_hf": ModelConfig(
+        model_class=AutoModelForImageTextToText,
+        processor_class=AutoProcessor,
+        requires_trust_remote_code=True,
+        supports_flash_attention=True,
+        processor_args={"use_fast": True},
+        inference_type="standard"  # Use standard HF generation
+    ),
     "gemma3": ModelConfig(
         model_class=Gemma3ForConditionalGeneration,
         processor_class=AutoProcessor,
@@ -201,7 +209,9 @@ class VLMWrapper:
 
     def _detect_model_type(self, model_id: str) -> str:
         """Detect model type from model_id."""
+        # Check for specific patterns first (more specific before generic)
         model_patterns = {
+            "internvl_hf": r"OpenGVLab/InternVL.*-HF",  # HF-native InternVL models (InternVL3-HF, etc.)
             "qwen": r"Qwen/",
             "llava": r"llava-hf/llava-1\.5",
             "llava_next": r"llava-hf/llava-v1\.6",
@@ -209,7 +219,7 @@ class VLMWrapper:
             "smolvlm": r"HuggingFaceTB/SmolVLM",
             "mllama": r"meta-llama",
             "minicpm": r"openbmb/MiniCPM",
-            "internvl": r"OpenGVLab/InternVL",
+            # "internvl": r"OpenGVLab/InternVL",  # Original InternVL with batch_chat
             "gemma3": r"google/gemma-3",
             "kimi": r"moonshotai/Kimi-VL",
             "glm4v": r"zai-org/GLM-4",
@@ -233,10 +243,7 @@ class VLMWrapper:
                 model_args["trust_remote_code"] = True
                 
             if self.config.supports_flash_attention and torch.cuda.is_available():
-                if self.model_type == "internvl":
-                    model_args["use_flash_attn"] = True
-                else:
-                    model_args["attn_implementation"] = "flash_attention_2"
+                model_args["attn_implementation"] = "flash_attention_2"
                 
             # Add special arguments
             model_args.update(self.config.special_args)
@@ -343,7 +350,7 @@ class VLMWrapper:
             for conv in batch_conversations
         ]
 
-        if self.model_type in ["mllama", "smolvlm", "idefics", "gemma3", "glm4v"]:           
+        if self.model_type in ["mllama", "smolvlm", "idefics", "gemma3", "glm4v", "internvl_hf"]:           
             images_to_process = [[img] for img in batch_images]
         else:
             images_to_process = batch_images 

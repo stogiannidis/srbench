@@ -6,10 +6,11 @@ import random
 import hashlib
 import pandas as pd
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from tqdm import tqdm
 from datasets import load_dataset, Dataset
 import torch
+from torch.utils.data import DataLoader
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -111,7 +112,7 @@ class EvaluationEngine:
                 "dtype": str(self.vlm.dtype),
             })
     
-    def _prepare_messages(self, questions: List[str], images: List[Image]) -> List[List[Dict]]:
+    def _prepare_messages(self, questions: List[str], images: List[Image.Image]) -> List[List[Dict]]:
         """Prepare messages in the required format with optional CoT and one-shot examples."""
         messages = []
         
@@ -248,7 +249,7 @@ class EvaluationEngine:
         return results
     
     def evaluate(self, dataset_id: str, batch_size: int = 16, max_samples: Optional[int] = None, 
-                sample_strategy: str = "first") -> str:
+                sample_strategy: str = "first", num_workers: int = 4) -> str:
         """
         Evaluate the model on the specified dataset with reproducible sampling.
         
@@ -257,6 +258,7 @@ class EvaluationEngine:
             batch_size: Number of examples per batch
             max_samples: Maximum number of samples to process
             sample_strategy: Sampling strategy ("first", "random", "stratified")
+            num_workers: Number of parallel data loading workers
             
         Returns:
             Path to the saved results CSV file
@@ -295,15 +297,30 @@ class EvaluationEngine:
         if missing_columns:
             raise ValueError(f"Dataset missing required columns: {missing_columns}")
         
-        # Process dataset in batches
+        # Convert to iterable format for efficient batching
+        # Use HuggingFace's built-in batching which is more memory efficient
+        data = data.with_format("python")  # Ensure consistent format
+        
+        # Process dataset in batches using DataLoader for prefetching
         all_results = []
         total_batches = (len(data) + batch_size - 1) // batch_size
-    
         
+        # Create DataLoader with prefetching for parallel data loading
+        # Note: prefetch_factor only valid when num_workers > 0
+        dataloader_kwargs = {
+            "batch_size": batch_size,
+            "shuffle": False,
+            "num_workers": num_workers,
+            "pin_memory": torch.cuda.is_available(),
+            "collate_fn": self._collate_batch,
+        }
+        if num_workers > 0:
+            dataloader_kwargs["prefetch_factor"] = 2
+        
+        dataloader = DataLoader(data, **dataloader_kwargs)
         with tqdm(total=total_batches, desc="Processing batches", colour="green") as pbar:
-            for i in range(0, len(data), batch_size):
-                batch = data[i:i + batch_size]
-                batch_results = self._process_batch(batch, i // batch_size, total_batches)
+            for batch_idx, batch in enumerate(dataloader):
+                batch_results = self._process_batch(batch, batch_idx, total_batches)
                 all_results.extend(batch_results)
                 
                 pbar.update(1)
@@ -313,7 +330,6 @@ class EvaluationEngine:
                     "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
                 })
                 
-        
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -323,6 +339,18 @@ class EvaluationEngine:
         logger.info(f"Evaluation completed. Results saved to: {output_path}")
         
         return output_path
+    
+    def _collate_batch(self, batch: List[Dict]) -> Dict[str, List]:
+        """
+        Custom collate function to convert list of dicts to dict of lists.
+        Handles PIL images properly without tensor conversion.
+        """
+        collated = {
+            "question": [item["question"] for item in batch],
+            "answer": [item["answer"] for item in batch],
+            "image": [item["image"] for item in batch],
+        }
+        return collated
     
     def _sample_dataset(self, dataset: Dataset, max_samples: int, strategy: str) -> Dataset:
         """Sample dataset using specified strategy for reproducibility."""
@@ -497,6 +525,11 @@ def parse_args():
         help="Batch size for processing"
     )
     parser.add_argument(
+        "--num_workers",
+        type=int, default=4,
+        help="Number of data loading workers (0 for main process only)"
+    )
+    parser.add_argument(
         "--max_samples",
         type=int, default=None,
         help="Maximum samples to process (for testing)"
@@ -540,7 +573,10 @@ def main():
     
     # print gpu info
     if torch.cuda.is_available():
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        gpu_count = torch.cuda.device_count()
+        print(f"Found {gpu_count} GPU(s):")
+        for i in range(gpu_count):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 1e9:.1f}GB)")
         print(f"CUDA version: {torch.version.cuda}")
     else:
         print("No GPU available, using CPU")
@@ -567,10 +603,11 @@ def main():
             dataset_id=args.dataset,
             batch_size=args.batch_size,
             max_samples=args.max_samples,
-            sample_strategy=args.sample_strategy
+            sample_strategy=args.sample_strategy,
+            num_workers=args.num_workers
         )
         
-        print(f"\n✅ Reproducible evaluation completed successfully!")
+        print("\n✅ Reproducible evaluation completed successfully!")
         print(f"📁 Results saved to: {output_path}")
         print(f"🔄 Evaluation can be reproduced using seed: {args.seed}")
         

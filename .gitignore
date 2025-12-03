@@ -46,3 +46,5 @@ output/
 # Legacy files
 example/
 legacy/
+
+Dockerfile
