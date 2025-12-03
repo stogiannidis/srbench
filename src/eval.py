@@ -16,7 +16,7 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 
-from utils.vlm_wrapper import VLMWrapper
+from utils.vlm import VLMEngine
 
 # Configure logging
 logging.basicConfig(
@@ -101,13 +101,12 @@ class EvaluationEngine:
         """Load the VLM model lazily to save memory."""
         if self.vlm is None:
             logger.info(f"Loading model: {self.model_id}")
-            self.vlm = VLMWrapper(self.model_id, self.device_map, dtype=torch.bfloat16)
+            self.vlm = VLMEngine(self.model_id, self.device_map, dtype=torch.bfloat16)
             logger.info("Model loaded successfully")
             
             # Add model-specific metadata
             self.eval_metadata.update({
                 "model_type": self.vlm.model_type,
-                "inference_type": self.vlm.config.inference_type,
                 "device_map": self.device_map,
                 "dtype": str(self.vlm.dtype),
             })
@@ -200,7 +199,7 @@ class EvaluationEngine:
             # Prepare inputs
             messages = self._prepare_messages(batch["question"], batch["image"])
             
-            # Unified batch processing leveraging unified preprocessing in VLMWrapper
+            # Unified batch processing
             results = self._process_batch_standard(messages, batch, batch_idx)
             
             return results
