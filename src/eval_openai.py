@@ -17,8 +17,16 @@ from tqdm import tqdm
 # Load the environment variables
 dotenv.load_dotenv()
 
-# Set up logging
-logging.basicConfig(filename="example.log", encoding="utf-8", level=logging.INFO)
+# Set up logging with both file and console output
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("eval_openai.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 
 def retry_with_exponential_backoff(max_retries=5, initial_delay=5):
@@ -37,16 +45,18 @@ def retry_with_exponential_backoff(max_retries=5, initial_delay=5):
         @wraps(func)
         def wrapper(*args, **kwargs):
             delay = initial_delay
-            for _ in range(max_retries):
+            for attempt in range(max_retries):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
                     if "429" in str(e):
-                        print(f"Rate limit exceeded. Retrying in {delay} seconds...")
+                        logger.warning(f"Rate limit exceeded (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...")
                         time.sleep(delay)
                         delay *= 2  # exponential backoff
                     else:
+                        logger.error(f"Error during API call: {e}")
                         raise e
+            logger.error("Max retries exceeded")
             raise Exception("Max retries exceeded")
 
         return wrapper
@@ -84,17 +94,20 @@ def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str
         List[str]: A list of responses from the model.
     """
     if not os.getenv("OPENROUTER_API_KEY"):
+        logger.error("OpenRouter API key not set in environment variables.")
         raise EnvironmentError(
             "OpenRouter API key not set in environment variables."
         )
 
+    logger.debug(f"Initializing OpenRouter client for model: {model}")
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     )
 
     contents = []
-    for prompt, image in zip(prompts, images):
+    for idx, (prompt, image) in enumerate(zip(prompts, images)):
+        logger.debug(f"Processing item {idx + 1}/{len(prompts)}")
         if isinstance(image, Image.Image):
             image_content = image_to_base64(image)
             image_content = f"data:image/png;base64,{image_content}"
@@ -153,6 +166,13 @@ def main():
     )
     args = parser.parse_args()
 
+    logger.info("=" * 50)
+    logger.info("Starting evaluation")
+    logger.info(f"Dataset: {args.dataset}")
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Batch size: {args.batch_size}")
+    logger.info("=" * 50)
+
     dataset_name = args.dataset
     short_name = dataset_name.split("/")[-1]
 
@@ -160,9 +180,13 @@ def main():
     model_name = model.split("/")[-1]
 
     # Load the specified dataset
+    logger.info(f"Loading dataset: {dataset_name}")
     dataset = load_dataset(dataset_name, split="test")
+    logger.info(f"Dataset loaded successfully. Total samples: {len(dataset)}")
 
     all_responses = []
+    total_batches = (len(dataset) + args.batch_size - 1) // args.batch_size
+    logger.info(f"Starting inference with {total_batches} batches")
 
     for i in tqdm(
         range(0, len(dataset), args.batch_size),
@@ -171,12 +195,17 @@ def main():
         leave=False,
         colour="magenta",
     ):
+        batch_num = i // args.batch_size + 1
+        logger.info(f"Processing batch {batch_num}/{total_batches}")
         batch = dataset[i : i + args.batch_size]
         prompts = batch["question"]
         images = batch["image"]
 
         responses = infer(prompts, images, model)
         all_responses.extend(responses)
+        logger.info(f"Batch {batch_num} completed. Total responses so far: {len(all_responses)}")
+
+    logger.info(f"Inference completed. Total responses: {len(all_responses)}")
 
     results_df = pd.DataFrame(
         {
@@ -189,8 +218,10 @@ def main():
     results_dir = f"output/evaluations/{short_name}/"
     os.makedirs(results_dir, exist_ok=True)
 
-    results_df.to_csv(os.path.join(results_dir, f"{model_name}.csv"), index=False)
-    print(f"Results saved to {os.path.join(results_dir, 'results.csv')}")
+    output_path = os.path.join(results_dir, f"{model_name}.csv")
+    results_df.to_csv(output_path, index=False)
+    logger.info(f"Results saved to {output_path}")
+    logger.info("Evaluation completed successfully")
 
 
 if __name__ == "__main__":
