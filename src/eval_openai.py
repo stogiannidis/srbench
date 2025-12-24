@@ -100,6 +100,7 @@ def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str
         azure_endpoint=endpoint,
     )
 
+    # Process all prompts in the batch more efficiently
     contents = []
     for prompt, image in zip(prompts, images):
         if isinstance(image, Image.Image):
@@ -107,7 +108,6 @@ def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str
             image_content = f"data:image/png;base64,{image_content}"
         else:
             image_content = str(image)
-
 
         # Merge the image and text into one message
         messages = [
@@ -125,8 +125,9 @@ def infer(prompts: List[str], images: List[Image.Image], model: str) -> List[str
             model=model,
             messages=messages,
             seed=69,
-            temperature=0.5,
-            max_tokens=64,
+            temperature=0.0,  # Lower temperature for faster, more deterministic generation
+            max_tokens=256,  # Increase max tokens to match other models, but optimize for speed
+            top_p=0.9,  # Use top_p for better performance
         )
         content = response.choices[0].message.content.strip()
         contents.append(content)

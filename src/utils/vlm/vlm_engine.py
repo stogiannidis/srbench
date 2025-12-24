@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Optional, Union
 from PIL import Image
 from transformers import (
     AutoModelForImageTextToText,
+    AutoModelForCausalLM,
     AutoProcessor,
+    AutoTokenizer,
 )
 
 from .base import (
@@ -44,6 +46,8 @@ SUPPORTED_MODEL_PATTERNS = {
     "internvl_hf": r"OpenGVLab/InternVL.*-HF",
     "llava": r"llava-hf/",
     "mllama": r"meta-llama/Llama.*Vision",
+    "minicpm": r"MiniCPM|openbmb/MiniCPM",
+    "kimi": r"moonshotai/Kimi-VL",
 }
 
 # Model-specific configurations
@@ -80,11 +84,23 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
         padding_side="left",
         processor_args={"use_fast": True, "padding_side": "left"},
     ),
+    "minicpm": ModelConfig(
+        model_class=AutoModelForCausalLM,
+        processor_class=AutoTokenizer,
+        requires_trust_remote_code=True,
+        processor_args={"use_fast": True, "padding_side": "left", "trust_remote_code": True},
+    ),
+    "kimi": ModelConfig(
+        model_class=AutoModelForImageTextToText,
+        processor_class=AutoProcessor,
+        requires_trust_remote_code=True,
+        processor_args={"use_fast": True, "padding_side": "left", "trust_remote_code": True},
+    ),
     # Default configuration for unknown models
     "default": ModelConfig(
         model_class=AutoModelForImageTextToText,
         processor_class=AutoProcessor,
-        processor_args={"use_fast": True},
+        processor_args={"use_fast": True, "padding_side": "left", "trust_remote_code": True},
     ),
 }
 
@@ -193,7 +209,7 @@ class VLMEngine(BaseVLM):
             
             logger.info(f"Loading model {self.model_id} with args: {model_args}")
             
-            model = AutoModelForImageTextToText.from_pretrained(
+            model = self.config.model_class.from_pretrained(
                 self.model_id, 
                 **model_args
             )
@@ -234,6 +250,36 @@ class VLMEngine(BaseVLM):
         except Exception as e:
             logger.error(f"Failed to load processor for {self.model_id}: {e}")
             raise
+
+    def _prepare_minicpm_messages(self, conversation: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert unified conversation format to MiniCPM chat messages."""
+        msgs: List[Dict[str, Any]] = []
+        for turn in conversation:
+            role = turn.get("role", "user")
+            content_items = turn.get("content", [])
+
+            parts: List[Any] = []
+            if isinstance(content_items, str):
+                parts.append(content_items)
+            elif isinstance(content_items, list):
+                for item in content_items:
+                    if isinstance(item, dict):
+                        if item.get("type") == "image":
+                            parts.append(item.get("image"))
+                        elif item.get("type") == "text":
+                            parts.append(item.get("text"))
+                    else:
+                        parts.append(item)
+            elif content_items is not None:
+                parts.append(content_items)
+
+            # MiniCPM expects list content for each turn
+            msgs.append({
+                "role": role,
+                "content": [p for p in parts if p is not None],
+            })
+
+        return msgs
     
     def _configure_padding(self, processor: Any) -> None:
         """
@@ -259,21 +305,21 @@ class VLMEngine(BaseVLM):
                 self.model.generation_config.pad_token_id = pad_token_id
     
     def preprocess(
-        self, 
-        conversation: List[List[Dict[str, Any]]], 
+        self,
+        conversation: List[List[Dict[str, Any]]],
         image_input: Optional[Union[Image.Image, List[Image.Image]]] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Preprocess inputs for the model.
-        
+
         Args:
             conversation: List of conversations, each being a list of turns.
                          Each turn is a dict with "role" and "content" keys.
             image_input: Optional list of images corresponding to conversations
-            
+
         Returns:
             Dictionary of preprocessed tensors ready for model input
-            
+
         Example:
             >>> conversation = [[{
             ...     "role": "user",
@@ -285,53 +331,61 @@ class VLMEngine(BaseVLM):
             >>> inputs = engine.preprocess(conversation, [img])
         """
         try:
+            if self.model_type == "minicpm":
+                return [self._prepare_minicpm_messages(conv) for conv in conversation]
+
             # Apply chat template to each conversation
             prompts = [
                 self.processor.apply_chat_template(
-                    conv, 
+                    conv,
                     add_generation_prompt=True,
                     tokenize=False
                 )
                 for conv in conversation
             ]
-            
+
             # Prepare images - wrap each image in a list for processors that expect it
             if image_input is not None:
                 images_to_process = [
-                    [img] if not isinstance(img, list) else img 
+                    [img] if not isinstance(img, list) else img
                     for img in image_input
                 ]
             else:
                 images_to_process = None
-            
+
             # Validate input lengths
             if images_to_process is not None:
                 assert len(prompts) == len(images_to_process), \
                     f"Number of prompts ({len(prompts)}) must match images ({len(images_to_process)})"
-            
-            # Process inputs
+
+            # Process inputs with optimized parameters for faster processing
             inputs = self.processor(
                 text=prompts,
                 images=images_to_process,
                 return_tensors="pt",
                 padding=True,
-            ).to(self.device, dtype=self.dtype)
-            
+                truncation=True,  # Enable truncation to prevent extremely long sequences
+                max_length=4096,  # Set reasonable max length to prevent memory issues
+            )
+
+            # Move to device and cast to dtype in a single operation
+            inputs = {k: v.to(self.device, dtype=self.dtype, non_blocking=True) for k, v in inputs.items()}
+
             return inputs
-            
+
         except Exception as e:
             logger.error(f"Preprocessing failed: {e}", exc_info=True)
             raise
     
     @torch.inference_mode()
     def generate(
-        self, 
-        inputs: Dict[str, torch.Tensor], 
+        self,
+        inputs: Dict[str, torch.Tensor],
         **generation_kwargs
     ) -> torch.Tensor:
         """
         Generate text from preprocessed inputs.
-        
+
         Args:
             inputs: Preprocessed inputs from preprocess()
             **generation_kwargs: Additional generation parameters
@@ -340,33 +394,53 @@ class VLMEngine(BaseVLM):
                 - temperature: Sampling temperature
                 - top_p: Nucleus sampling parameter
                 - etc.
-                
+
         Returns:
             Generated token IDs (prompt tokens removed)
         """
         try:
-            # Set default generation parameters
+            if self.model_type == "minicpm":
+                outputs: List[str] = []
+                for msgs in inputs:
+                    answer = self.model.chat(
+                        msgs=msgs,
+                        tokenizer=self.processor,
+                        stream=False,
+                        **generation_kwargs,
+                    )
+                    # chat can return str directly; keep behavior consistent
+                    outputs.append(answer if isinstance(answer, str) else "".join(answer))
+                return outputs
+
+            # Set default generation parameters optimized for performance
             gen_params = {
-                "max_new_tokens": 1024,
+                "max_new_tokens": 512,  # Reduced from 1024 for faster inference
                 "do_sample": False,
+                "use_cache": True,  # Enable KV cache for faster generation
+                "return_dict_in_generate": False,  # Reduce memory overhead
+                "output_scores": False,  # Don't return scores to save memory
+                "num_beams": 1,  # Use greedy decoding for speed
+                "early_stopping": False,  # Don't use early stopping to avoid overhead
+                "min_new_tokens": 1,  # Minimum tokens to generate
+                "suppress_tokens": getattr(self.model.generation_config, "suppress_tokens", None),  # Suppress specific tokens if configured
             }
             gen_params.update(generation_kwargs)
-            
-            # Generate sequences
+
+            # Generate sequences with optimized parameters
             sequences = self.model.generate(
                 **inputs,
                 **gen_params
             )
-            
+
             # Remove prompt tokens from generated sequences
             prompt_length = inputs["input_ids"].shape[-1]
             if sequences.dim() == 1:
                 generated_ids = sequences[prompt_length:]
             else:
                 generated_ids = sequences[:, prompt_length:]
-            
+
             return generated_ids
-            
+
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
@@ -382,6 +456,10 @@ class VLMEngine(BaseVLM):
             List of decoded text strings
         """
         try:
+            if self.model_type == "minicpm":
+                # Already a list of strings from generate()
+                return list(generated_ids)
+
             return self.processor.batch_decode(
                 generated_ids, 
                 skip_special_tokens=True,
