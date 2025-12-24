@@ -16,7 +16,7 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 
-from utils.vlm_wrapper import VLMWrapper
+from utils.vlm import VLMEngine
 
 # Configure logging
 logging.basicConfig(
@@ -101,13 +101,12 @@ class EvaluationEngine:
         """Load the VLM model lazily to save memory."""
         if self.vlm is None:
             logger.info(f"Loading model: {self.model_id}")
-            self.vlm = VLMWrapper(self.model_id, self.device_map, dtype=torch.bfloat16)
+            self.vlm = VLMEngine(self.model_id, self.device_map, dtype=torch.bfloat16)
             logger.info("Model loaded successfully")
             
             # Add model-specific metadata
             self.eval_metadata.update({
                 "model_type": self.vlm.model_type,
-                "inference_type": self.vlm.config.inference_type,
                 "device_map": self.device_map,
                 "dtype": str(self.vlm.dtype),
             })
@@ -200,7 +199,7 @@ class EvaluationEngine:
             # Prepare inputs
             messages = self._prepare_messages(batch["question"], batch["image"])
             
-            # Unified batch processing leveraging unified preprocessing in VLMWrapper
+            # Unified batch processing
             results = self._process_batch_standard(messages, batch, batch_idx)
             
             return results
@@ -220,21 +219,27 @@ class EvaluationEngine:
     def _process_batch_standard(self, messages: List[List[Dict]], batch: Dict[str, List], batch_idx: int) -> List[Dict[str, str]]:
         """Process batch for standard VLM models."""
         results = []
-        
+
         with self.vlm.memory_efficient_mode():
             # Preprocess the entire batch
             inputs = self.vlm.preprocess(conversation=messages, image_input=batch["image"])
-            
 
+            # Optimize generation parameters for faster inference
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=1024,
-                do_sample=False
+                max_new_tokens=4096, 
+                do_sample=False,
+                pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
+                use_cache=True,  # Enable KV cache reuse
+                # Reduce memory footprint by using more efficient parameters
             )
-            
+
             output_texts = self.vlm.decode(generated_ids)
 
-            del inputs, generated_ids  # Free memory
+            # Free memory explicitly
+            del inputs
+            if isinstance(generated_ids, torch.Tensor):
+                del generated_ids
 
             # Process results for each example in the batch
             for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
@@ -248,35 +253,35 @@ class EvaluationEngine:
 
         return results
     
-    def evaluate(self, dataset_id: str, batch_size: int = 16, max_samples: Optional[int] = None, 
+    def evaluate(self, dataset_id: str, batch_size: int = 16, max_samples: Optional[int] = None,
                 sample_strategy: str = "first", num_workers: int = 4) -> str:
         """
         Evaluate the model on the specified dataset with reproducible sampling.
-        
+
         Args:
             dataset_id: HuggingFace dataset identifier
             batch_size: Number of examples per batch
             max_samples: Maximum number of samples to process
             sample_strategy: Sampling strategy ("first", "random", "stratified")
             num_workers: Number of parallel data loading workers
-            
+
         Returns:
             Path to the saved results CSV file
         """
         # Load model lazily
         self._load_model()
-        
+
         # Load and sample dataset
         try:
-            data = load_dataset(dataset_id, split="train")
+            data = load_dataset(dataset_id, split="test")
             original_size = len(data)
-            
+
             # Apply sampling strategy
             if max_samples and max_samples < original_size:
                 data = self._sample_dataset(data, max_samples, sample_strategy)
-            
+
             logger.info(f"Loaded dataset: {original_size} total, {len(data)} selected samples")
-            
+
             # Add dataset hash to metadata
             self.eval_metadata.update({
                 "dataset_id": dataset_id,
@@ -286,58 +291,63 @@ class EvaluationEngine:
                 "sample_strategy": sample_strategy,
                 "max_samples": max_samples,
             })
-            
+
         except Exception as e:
             logger.error(f"Failed to load dataset {dataset_id}: {e}")
             raise
-        
+
         # Validate dataset format
         required_columns = ["question", "answer", "image"]
         missing_columns = [col for col in required_columns if col not in data.column_names]
         if missing_columns:
             raise ValueError(f"Dataset missing required columns: {missing_columns}")
-        
+
         # Convert to iterable format for efficient batching
         # Use HuggingFace's built-in batching which is more memory efficient
         data = data.with_format("python")  # Ensure consistent format
-        
+
         # Process dataset in batches using DataLoader for prefetching
         all_results = []
         total_batches = (len(data) + batch_size - 1) // batch_size
-        
-        # Create DataLoader with prefetching for parallel data loading
-        # Note: prefetch_factor only valid when num_workers > 0
+
+        # Create DataLoader with optimized parameters for faster data loading
         dataloader_kwargs = {
             "batch_size": batch_size,
             "shuffle": False,
             "num_workers": num_workers,
-            "pin_memory": torch.cuda.is_available(),
+            "pin_memory": torch.cuda.is_available(),  # Enable pin_memory for faster GPU transfer
             "collate_fn": self._collate_batch,
+            "persistent_workers": num_workers > 0,  # Keep workers alive between iterations
+            "prefetch_factor": 2 if num_workers > 0 else None,  # Prefetch batches to overlap data loading
         }
-        if num_workers > 0:
-            dataloader_kwargs["prefetch_factor"] = 2
-        
+
         dataloader = DataLoader(data, **dataloader_kwargs)
+
+        # Initialize tqdm with additional performance metrics
         with tqdm(total=total_batches, desc="Processing batches", colour="green") as pbar:
             for batch_idx, batch in enumerate(dataloader):
                 batch_results = self._process_batch(batch, batch_idx, total_batches)
                 all_results.extend(batch_results)
-                
-                pbar.update(1)
-                pbar.set_postfix({
-                    "processed": len(all_results),
-                    "memory": f"{torch.cuda.memory_allocated() / 1e9:.1f}GB" if torch.cuda.is_available() else "N/A",
-                    "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
-                })
-                
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-        
+
+                # Update progress bar less frequently to reduce overhead
+                if batch_idx % 5 == 0 or batch_idx == total_batches - 1:
+                    pbar.update(5 if batch_idx + 5 < total_batches else total_batches - batch_idx)
+                    pbar.set_postfix({
+                        "processed": len(all_results),
+                        "memory": f"{torch.cuda.memory_allocated() / 1e9:.1f}GB" if torch.cuda.is_available() else "N/A",
+                        "success_rate": f"{sum(1 for r in all_results if not r['response'].startswith('ERROR')) / len(all_results) * 100:.1f}%"
+                    })
+
+                # Perform garbage collection less frequently to reduce overhead
+                if batch_idx % 10 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
         # Save results with metadata
         output_path = self._save_results_with_metadata(all_results, dataset_id)
         logger.info(f"Evaluation completed. Results saved to: {output_path}")
-        
+
         return output_path
     
     def _collate_batch(self, batch: List[Dict]) -> Dict[str, List]:
@@ -570,7 +580,7 @@ def parse_args():
 
 def main():
     """Main function with comprehensive error handling."""
-    
+
     # print gpu info
     if torch.cuda.is_available():
         gpu_count = torch.cuda.device_count()
@@ -578,17 +588,24 @@ def main():
         for i in range(gpu_count):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 1e9:.1f}GB)")
         print(f"CUDA version: {torch.version.cuda}")
+
+        # Optimize CUDA settings for better performance
+        torch.backends.cudnn.benchmark = True  # Enable cuDNN benchmark for faster convolutions
+        if hasattr(torch.backends.cudnn, 'allow_tf32'):
+            torch.backends.cudnn.allow_tf32 = True  # Enable TensorFloat32 for A100+ GPUs
+        if hasattr(torch.backends, 'cuda'):
+            torch.backends.cuda.matmul.allow_tf32 = True  # Enable TensorFloat32 for matmul
     else:
         print("No GPU available, using CPU")
-    
+
     args = parse_args()
-    
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    
+
     # Load one-shot example if provided
     one_shot_example = load_one_shot_example(args.one_shot) if args.one_shot else None
-    
+
     try:
         # Create reproducible evaluation engine
         eval_engine = EvaluationEngine(
@@ -598,7 +615,7 @@ def main():
             use_cot=args.cot,
             one_shot_example=one_shot_example
         )
-        
+
         output_path = eval_engine.evaluate(
             dataset_id=args.dataset,
             batch_size=args.batch_size,
@@ -606,11 +623,11 @@ def main():
             sample_strategy=args.sample_strategy,
             num_workers=args.num_workers
         )
-        
+
         print("\n✅ Reproducible evaluation completed successfully!")
         print(f"📁 Results saved to: {output_path}")
         print(f"🔄 Evaluation can be reproduced using seed: {args.seed}")
-        
+
     except KeyboardInterrupt:
         logger.info("Evaluation interrupted by user")
         print("\n⚠️  Evaluation interrupted by user")
