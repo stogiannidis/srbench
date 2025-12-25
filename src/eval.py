@@ -174,7 +174,8 @@ class EvaluationEngine:
         
         cot_prompt = (
             "Please think step by step and explain your reasoning before providing answering the question.\n"
-            "Provide the final answer at the end of your reasoning in curly bracket, e.g., {A} or {yes}.\n\n"
+            "Provide your reasoning first.\n"
+            "Then, on a new line, output ONLY the final answer enclosed in curly brackets, e.g., {A}.\n"
             f"Question: {question.strip()}\n\n"
         )
         

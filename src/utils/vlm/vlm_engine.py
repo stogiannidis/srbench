@@ -368,8 +368,18 @@ class VLMEngine(BaseVLM):
                 max_length=4096,  # Set reasonable max length to prevent memory issues
             )
 
-            # Move to device and cast to dtype in a single operation
-            inputs = {k: v.to(self.device, dtype=self.dtype, non_blocking=True) for k, v in inputs.items()}
+            # Move tensors to device; only cast floating tensors to avoid corrupting ids
+            device_inputs: Dict[str, torch.Tensor] = {}
+            for k, v in inputs.items():
+                if torch.is_tensor(v):
+                    if torch.is_floating_point(v):
+                        device_inputs[k] = v.to(self.device, dtype=self.dtype, non_blocking=True)
+                    else:
+                        device_inputs[k] = v.to(self.device, non_blocking=True)
+                else:
+                    device_inputs[k] = v
+
+            inputs = device_inputs
 
             return inputs
 
