@@ -222,8 +222,18 @@ class EvaluationEngine:
         results = []
 
         with self.vlm.memory_efficient_mode():
+            # Prepare images - include one-shot image if present
+            if self.one_shot_example:
+                # Each sample needs [one_shot_image, question_image]
+                image_input = [
+                    [self.one_shot_example["image"], img] 
+                    for img in batch["image"]
+                ]
+            else:
+                image_input = batch["image"]
+            
             # Preprocess the entire batch
-            inputs = self.vlm.preprocess(conversation=messages, image_input=batch["image"])
+            inputs = self.vlm.preprocess(conversation=messages, image_input=image_input)
 
             # Optimize generation parameters for faster inference
             generated_ids = self.vlm.generate(

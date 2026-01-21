@@ -359,13 +359,15 @@ class VLMEngine(BaseVLM):
                     f"Number of prompts ({len(prompts)}) must match images ({len(images_to_process)})"
 
             # Process inputs with optimized parameters for faster processing
+            # Note: truncation must be False for multimodal models to avoid mismatch
+            # between image tokens in text and input_ids
             inputs = self.processor(
                 text=prompts,
                 images=images_to_process,
                 return_tensors="pt",
                 padding=True,
-                truncation=True,  # Enable truncation to prevent extremely long sequences
-                max_length=4096,  # Set reasonable max length to prevent memory issues
+                truncation=False,
+                max_length=8192,
             )
 
             # Move tensors to device; only cast floating tensors to avoid corrupting ids
