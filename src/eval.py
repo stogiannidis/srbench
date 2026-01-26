@@ -18,6 +18,13 @@ from PIL import Image
 
 from utils.vlm import VLMEngine
 
+# Optional import for structured output
+try:
+    from pydantic import BaseModel
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -29,11 +36,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# Pydantic schema for structured JSON output
+if PYDANTIC_AVAILABLE:
+    class StructuredAnswer(BaseModel):
+        """Schema for structured JSON responses from VLMs."""
+        reasoning: str
+        answer: str
+
+
 class EvaluationEngine:
     """Evaluation engine for all VLM types with enhanced features."""
     
     def __init__(self, model_id: str, device_map: str = "auto", seed: int = 42, 
-                 use_cot: bool = False, one_shot_example: Optional[Dict] = None):
+                 use_cot: bool = False, one_shot_example: Optional[Dict] = None,
+                 structured_output: str = "none"):
         """
         Initialize the evaluation engine.
         
@@ -43,6 +60,7 @@ class EvaluationEngine:
             seed: Random seed for reproducibility
             use_cot: Enable Chain-of-Thought prompting
             one_shot_example: One-shot example dictionary
+            structured_output: Output format (none, json, curly)
         """
         self.model_id = model_id
         self.short_name = self._extract_model_name(model_id)
@@ -50,6 +68,7 @@ class EvaluationEngine:
         self.seed = seed
         self.use_cot = use_cot
         self.one_shot_example = one_shot_example
+        self.structured_output = structured_output
         
         # Initialize reproducibility
         self._set_seed(seed)
@@ -63,12 +82,13 @@ class EvaluationEngine:
             "seed": seed,
             "use_cot": use_cot,
             "has_one_shot": one_shot_example is not None,
+            "structured_output": structured_output,
             "timestamp": datetime.now().isoformat(),
             "torch_version": torch.__version__,
         }
         
         logger.info(f"Initialized EvaluationEngine for model: {model_id}")
-        logger.info(f"Seed: {seed}, CoT: {use_cot}, One-shot: {one_shot_example is not None}")
+        logger.info(f"Seed: {seed}, CoT: {use_cot}, One-shot: {one_shot_example is not None}, Structured: {structured_output}")
     
     def _set_seed(self, seed: int):
         """Set all random seeds for reproducibility."""
@@ -168,18 +188,39 @@ class EvaluationEngine:
         return messages
     
     def _format_question_with_cot(self, question: str) -> str:
-        """Format question with Chain-of-Thought prompting if enabled."""
-        if not self.use_cot:
-            return question.strip()
+        """Format question with Chain-of-Thought prompting and/or structured output if enabled."""
+        question = question.strip()
         
-        cot_prompt = (
-            "Please think step by step and explain your reasoning before providing answering the question.\n"
-            "Provide your reasoning first.\n"
-            "Then, on a new line, output ONLY the final answer enclosed in curly brackets, e.g., {A}.\n"
-            f"Question: {question.strip()}\n\n"
-        )
+        # Build format instruction based on structured_output setting
+        format_instruction = self._get_format_instruction()
         
-        return cot_prompt
+        if self.use_cot:
+            cot_prompt = (
+                "Please think step by step and explain your reasoning before answering the question.\n"
+                "Provide your reasoning first.\n"
+                f"{format_instruction}\n"
+                f"Question: {question}\n\n"
+            )
+            return cot_prompt
+        
+        # No CoT, but may have structured output
+        if self.structured_output != "none":
+            return f"{question}\n\n{format_instruction}"
+        
+        return question
+    
+    def _get_format_instruction(self) -> str:
+        """Get the format instruction based on structured_output setting."""
+        if self.structured_output == "json":
+            return (
+                'Then, on a new line, output ONLY valid JSON in this exact format: {"reasoning": "your step-by-step reasoning here", "answer": "X"} '
+                'where X is your final answer (e.g., "A", "B", "C", "yes", "no", "left", "right", etc.).'
+            )
+        elif self.structured_output == "curly":
+            return "Then, on a new line, output ONLY the final answer enclosed in curly brackets, e.g., {A}."
+        else:
+            # Default for CoT without structured output
+            return "Then, on a new line, output ONLY the final answer enclosed in curly brackets, e.g., {A}."
     
     def _process_batch(self, batch: Dict[str, List], batch_idx: int, total_batches: int) -> List[Dict[str, str]]:
         """
@@ -235,22 +276,49 @@ class EvaluationEngine:
             # Preprocess the entire batch
             inputs = self.vlm.preprocess(conversation=messages, image_input=image_input)
 
-            # Optimize generation parameters for faster inference
-            generated_ids = self.vlm.generate(
-                inputs,
-                max_new_tokens=4096, 
-                do_sample=False,
-                pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
-                use_cache=True,  # Enable KV cache reuse
-                # Reduce memory footprint by using more efficient parameters
-            )
+            # Use structured generation for JSON output if enabled
+            if self.structured_output == "json" and PYDANTIC_AVAILABLE:
+                try:
+                    # generate_structured returns a list of JSON strings
+                    output_texts = self.vlm.generate_structured(
+                        inputs,
+                        schema=StructuredAnswer,
+                        max_new_tokens=4096,
+                    )
+                    
+                    # Free memory
+                    del inputs
+                    
+                except Exception as e:
+                    logger.warning(f"Structured generation failed, falling back to standard: {e}")
+                    # Fall back to standard generation
+                    generated_ids = self.vlm.generate(
+                        inputs,
+                        max_new_tokens=4096, 
+                        do_sample=False,
+                        pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
+                        use_cache=True,
+                    )
+                    output_texts = self.vlm.decode(generated_ids)
+                    del inputs
+                    if isinstance(generated_ids, torch.Tensor):
+                        del generated_ids
+            else:
+                # Standard generation (non-structured)
+                generated_ids = self.vlm.generate(
+                    inputs,
+                    max_new_tokens=4096, 
+                    do_sample=False,
+                    pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
+                    use_cache=True,  # Enable KV cache reuse
+                )
 
-            output_texts = self.vlm.decode(generated_ids)
+                output_texts = self.vlm.decode(generated_ids)
 
-            # Free memory explicitly
-            del inputs
-            if isinstance(generated_ids, torch.Tensor):
-                del generated_ids
+                # Free memory explicitly
+                del inputs
+                if isinstance(generated_ids, torch.Tensor):
+                    del generated_ids
 
             # Process results for each example in the batch
             for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
@@ -456,7 +524,7 @@ class EvaluationEngine:
         if self.use_cot and self.one_shot_example:
             return "cot_oneshot"
         elif self.use_cot:
-            return "cot_test"
+            return "cot_json"
         elif self.one_shot_example:
             return "oneshot"
         else:
@@ -581,6 +649,12 @@ def parse_args():
         help="Path to one-shot example JSON file"
     )
     parser.add_argument(
+        "--structured-output",
+        type=str, default="none",
+        choices=["none", "json", "curly"],
+        help="Enable structured output format (none: free-form, json: JSON response, curly: answer in curly brackets)"
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging"
@@ -624,7 +698,8 @@ def main():
             device_map=args.device_map,
             seed=args.seed,
             use_cot=args.cot,
-            one_shot_example=one_shot_example
+            one_shot_example=one_shot_example,
+            structured_output=args.structured_output
         )
 
         output_path = eval_engine.evaluate(

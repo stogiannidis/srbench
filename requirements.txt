@@ -4,6 +4,9 @@ tiktoken
 hf-xet
 tqdm
 transformers==4.57.3
-triton==3.2.0
+triton
 flash-attn
 datasets
+torchvision==0.23.0
+outlines
+pydantic

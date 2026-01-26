@@ -16,7 +16,7 @@ Supported models include:
 import logging
 import re
 import torch
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Type
 
 from PIL import Image
 from transformers import (
@@ -456,6 +456,77 @@ class VLMEngine(BaseVLM):
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
+    
+    @torch.inference_mode()
+    def generate_structured(
+        self,
+        inputs: Dict[str, torch.Tensor],
+        schema: Type,
+        **generation_kwargs
+    ) -> List[str]:
+        """
+        Generate structured output conforming to a Pydantic schema.
+        
+        Uses the outlines library for constrained generation that guarantees
+        valid JSON output matching the provided schema.
+
+        Args:
+            inputs: Preprocessed inputs from preprocess()
+            schema: Pydantic BaseModel class defining the output structure
+            **generation_kwargs: Additional generation parameters
+
+        Returns:
+            List of JSON strings conforming to the schema
+            
+        Raises:
+            ImportError: If outlines library is not installed
+            
+        Example:
+            >>> from pydantic import BaseModel
+            >>> class Answer(BaseModel):
+            ...     reasoning: str
+            ...     answer: str
+            >>> results = engine.generate_structured(inputs, Answer)
+            >>> # results is a list of JSON strings
+            >>> parsed = Answer.model_validate_json(results[0])
+        """
+        # Lazy import to avoid version conflicts at module load time
+        import outlines
+        
+        # Ensure model and processor are loaded
+        _ = self.model
+        _ = self.processor
+        
+        # Create outlines model wrapper using the new API
+        tokenizer = self.processor.tokenizer if hasattr(self.processor, 'tokenizer') else self.processor
+        outlines_model = outlines.from_transformers(self.model, tokenizer)
+        
+        # Set default generation parameters
+        gen_params = {
+            "max_new_tokens": generation_kwargs.pop("max_new_tokens", 8192),
+        }
+        gen_params.update(generation_kwargs)
+        
+        # Generate for each input in the batch
+        results = []
+        batch_size = inputs["input_ids"].shape[0]
+        
+        for i in range(batch_size):
+            # Extract single input
+            single_input = {
+                k: v[i:i+1] if torch.is_tensor(v) else v 
+                for k, v in inputs.items()
+            }
+            
+            # Decode prompt for outlines
+            prompt = self.processor.decode(single_input["input_ids"][0], skip_special_tokens=False)
+            
+            # Generate structured output - new API: model(prompt, schema, **kwargs)
+            # Returns a JSON string, not a Pydantic object
+            result = outlines_model(prompt, schema, **gen_params)
+            results.append(result)
+        
+        return results
     
     def decode(self, generated_ids: torch.Tensor) -> List[str]:
         """

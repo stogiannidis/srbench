@@ -1,6 +1,7 @@
 import re
 import glob
 import os
+import json
 import pandas as pd
 import argparse
 import sys
@@ -14,6 +15,50 @@ def normalize_answer(ans):
     except Exception as e:
         pass
     return ans
+
+
+def extract_answer_json(text):
+    """
+    Extracts the answer from a JSON-formatted response.
+    Falls back to regex extraction if JSON parsing fails.
+    
+    Args:
+        text (str): The LLM-generated text, expected to contain JSON like {"answer": "A"}
+        
+    Returns:
+        str: The extracted answer in uppercase (e.g., "A", "YES") or result from fallback extraction.
+    """
+    if pd.isna(text) or text == "":
+        return "None"
+    
+    text = str(text)
+    
+    # Try to find and parse JSON in the response
+    # Look for {"answer": ...} pattern anywhere in the text
+    json_pattern = r'\{[^{}]*"answer"\s*:\s*"?([^"}\s]+)"?[^{}]*\}'
+    json_match = re.search(json_pattern, text, re.IGNORECASE)
+    
+    if json_match:
+        # Try to extract the answer value
+        answer = json_match.group(1).strip().upper()
+        if answer:
+            return answer
+    
+    # Try to parse the entire text or find embedded JSON
+    try:
+        # Look for JSON object in the text
+        json_start = text.find('{')
+        json_end = text.rfind('}') + 1
+        if json_start != -1 and json_end > json_start:
+            json_str = text[json_start:json_end]
+            data = json.loads(json_str)
+            if isinstance(data, dict) and 'answer' in data:
+                return str(data['answer']).strip().upper()
+    except (json.JSONDecodeError, ValueError):
+        pass
+    
+    # Fallback to standard extraction
+    return extract_answer(text)
 
 
 def extract_answer(text):
