@@ -2,11 +2,12 @@ accelerate
 qwen-vl-utils
 tiktoken
 hf-xet
+hf_transfer
 tqdm
 transformers==4.57.3
 triton
 flash-attn
 datasets
-torchvision==0.23.0
+torchvision
 outlines
 pydantic

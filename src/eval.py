@@ -37,6 +37,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+MAX_NEW_TOKENS = 8192
+
 # Pydantic schema for structured JSON output
 if PYDANTIC_AVAILABLE:
     class StructuredAnswer(BaseModel):
@@ -283,7 +285,7 @@ class EvaluationEngine:
                     output_texts = self.vlm.generate_structured(
                         inputs,
                         schema=StructuredAnswer,
-                        max_new_tokens=4096,
+                        max_new_tokens=MAX_NEW_TOKENS,
                     )
                     
                     # Free memory
@@ -294,7 +296,7 @@ class EvaluationEngine:
                     # Fall back to standard generation
                     generated_ids = self.vlm.generate(
                         inputs,
-                        max_new_tokens=4096, 
+                        max_new_tokens=MAX_NEW_TOKENS, 
                         do_sample=False,
                         pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
                         use_cache=True,
@@ -307,7 +309,7 @@ class EvaluationEngine:
                 # Standard generation (non-structured)
                 generated_ids = self.vlm.generate(
                     inputs,
-                    max_new_tokens=4096, 
+                    max_new_tokens=MAX_NEW_TOKENS, 
                     do_sample=False,
                     pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
                     use_cache=True,  # Enable KV cache reuse
