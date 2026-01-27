@@ -367,7 +367,6 @@ class VLMEngine(BaseVLM):
                 return_tensors="pt",
                 padding=True,
                 truncation=False,
-                max_length=8192,
             )
 
             # Move tensors to device; only cast floating tensors to avoid corrupting ids

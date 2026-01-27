@@ -18,6 +18,8 @@ from PIL import Image
 
 from utils.vlm import VLMEngine
 
+MAX_NEW_TOKENS = 8192  # Maximum tokens to generate
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -238,7 +240,7 @@ class EvaluationEngine:
             # Optimize generation parameters for faster inference
             generated_ids = self.vlm.generate(
                 inputs,
-                max_new_tokens=4096, 
+                max_new_tokens=MAX_NEW_TOKENS, 
                 do_sample=False,
                 pad_token_id=self.vlm.model.generation_config.pad_token_id if hasattr(self.vlm.model.generation_config, 'pad_token_id') else self.vlm.processor.tokenizer.pad_token_id,
                 use_cache=True,  # Enable KV cache reuse
