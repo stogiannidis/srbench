@@ -255,11 +255,12 @@ class EvaluationEngine:
                 del generated_ids
 
             # Process results for each example in the batch
-            for idx, (raw_prediction, question, ground_truth) in enumerate(zip(output_texts, batch["question"], batch["answer"])):
+            for idx, (raw_prediction, question, ground_truth, split) in enumerate(zip(output_texts, batch["question"], batch["answer"], batch["split"])):
                 results.append({
                     "question": question,
                     "response": raw_prediction,
                     "gold answer": ground_truth,
+                    "split": split,
                     "batch_idx": batch_idx,
                     "example_idx": idx,
                 })
@@ -372,6 +373,7 @@ class EvaluationEngine:
             "question": [item["question"] for item in batch],
             "answer": [item["answer"] for item in batch],
             "image": [item["image"] for item in batch],
+            "split": [item.get("split", "") for item in batch],
         }
         return collated
     

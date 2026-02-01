@@ -48,6 +48,7 @@ SUPPORTED_MODEL_PATTERNS = {
     "mllama": r"meta-llama/Llama.*Vision",
     "minicpm": r"MiniCPM|openbmb/MiniCPM",
     "kimi": r"moonshotai/Kimi-VL",
+    "glm": r"GLM.*V|THUDM/glm",
 }
 
 # Model-specific configurations
@@ -94,6 +95,13 @@ MODEL_CONFIGS: Dict[str, ModelConfig] = {
         model_class=AutoModelForImageTextToText,
         processor_class=AutoProcessor,
         requires_trust_remote_code=True,
+        processor_args={"use_fast": True, "padding_side": "left", "trust_remote_code": True},
+    ),
+    "glm": ModelConfig(
+        model_class=AutoModelForCausalLM,
+        processor_class=AutoTokenizer,
+        requires_trust_remote_code=True,
+        supports_flash_attention=True,
         processor_args={"use_fast": True, "padding_side": "left", "trust_remote_code": True},
     ),
     # Default configuration for unknown models
@@ -223,30 +231,31 @@ class VLMEngine(BaseVLM):
     def _load_processor(self) -> Any:
         """
         Load the processor with optimized settings.
-        
+
         Returns:
             Loaded and configured processor
         """
         try:
             processor_args = {}
-            
+
             if self.config.requires_trust_remote_code:
                 processor_args["trust_remote_code"] = True
-            
+
             processor_args.update(self.config.processor_args)
-            
+
             logger.info(f"Loading processor for {self.model_id}")
-            
-            processor = AutoProcessor.from_pretrained(
-                self.model_id, 
+
+            # Use the configured processor class (AutoProcessor or AutoTokenizer)
+            processor = self.config.processor_class.from_pretrained(
+                self.model_id,
                 **processor_args
             )
-            
+
             # Configure padding
             self._configure_padding(processor)
-            
+
             return processor
-            
+
         except Exception as e:
             logger.error(f"Failed to load processor for {self.model_id}: {e}")
             raise
@@ -280,6 +289,45 @@ class VLMEngine(BaseVLM):
             })
 
         return msgs
+
+    def _prepare_glm_inputs(
+        self,
+        conversation: List[List[Dict[str, Any]]],
+        image_input: Optional[Union[Image.Image, List[Image.Image]]] = None
+    ) -> List[Dict[str, Any]]:
+        """Prepare inputs for GLM-4V models which use model.chat() interface."""
+        prepared_inputs = []
+
+        for idx, conv in enumerate(conversation):
+            # Extract image and query from conversation
+            image = None
+            query_parts = []
+
+            for turn in conv:
+                content_items = turn.get("content", [])
+                if isinstance(content_items, str):
+                    query_parts.append(content_items)
+                elif isinstance(content_items, list):
+                    for item in content_items:
+                        if isinstance(item, dict):
+                            if item.get("type") == "image":
+                                image = item.get("image")
+                            elif item.get("type") == "text":
+                                query_parts.append(item.get("text"))
+                        elif isinstance(item, str):
+                            query_parts.append(item)
+
+            # Use image from image_input if not found in conversation
+            if image is None and image_input is not None:
+                if isinstance(image_input, list) and idx < len(image_input):
+                    image = image_input[idx]
+                elif not isinstance(image_input, list):
+                    image = image_input
+
+            query = " ".join(query_parts)
+            prepared_inputs.append({"image": image, "query": query})
+
+        return prepared_inputs
     
     def _configure_padding(self, processor: Any) -> None:
         """
@@ -333,6 +381,9 @@ class VLMEngine(BaseVLM):
         try:
             if self.model_type == "minicpm":
                 return [self._prepare_minicpm_messages(conv) for conv in conversation]
+
+            if self.model_type == "glm":
+                return self._prepare_glm_inputs(conversation, image_input)
 
             # Apply chat template to each conversation
             prompts = [
@@ -423,6 +474,21 @@ class VLMEngine(BaseVLM):
                     outputs.append(answer if isinstance(answer, str) else "".join(answer))
                 return outputs
 
+            if self.model_type == "glm":
+                outputs: List[str] = []
+                for inp in inputs:
+                    image = inp.get("image")
+                    query = inp.get("query", "")
+                    response, _ = self.model.chat(
+                        self.processor,
+                        image=image,
+                        query=query,
+                        history=[],
+                        **generation_kwargs,
+                    )
+                    outputs.append(response if isinstance(response, str) else str(response))
+                return outputs
+
             # Set default generation parameters optimized for performance
             gen_params = {
                 "max_new_tokens": 512,  # Reduced from 1024 for faster inference
@@ -467,7 +533,7 @@ class VLMEngine(BaseVLM):
             List of decoded text strings
         """
         try:
-            if self.model_type == "minicpm":
+            if self.model_type in ("minicpm", "glm"):
                 # Already a list of strings from generate()
                 return list(generated_ids)
 
