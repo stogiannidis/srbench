@@ -7,3 +7,4 @@ transformers==4.57.3
 triton==3.2.0
 flash-attn
 datasets
+num2words
